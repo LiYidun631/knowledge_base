@@ -1,0 +1,1 @@
+"""Original document storage implementation."""

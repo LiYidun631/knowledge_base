@@ -1,0 +1,22 @@
+# 仅在 KNOWLEDGE_SERVICE_OBJECT_STORAGE_BACKEND=s3 时需要启动 RustFS；默认本地文件存储不依赖此容器。
+name: knowledge-infra
+
+services:
+  rustfs:
+    image: ${KNOWLEDGE_SERVICE_LOCAL_RUSTFS_IMAGE:-rustfs/rustfs:latest}
+    restart: unless-stopped
+    command: ["server", "--address", ":9000", "--console-enable", "--console-address", ":9001", "/data"]
+    environment:
+      RUSTFS_ACCESS_KEY: ${KNOWLEDGE_SERVICE_OBJECT_STORAGE_ACCESS_KEY:-knowledge-service}
+      RUSTFS_SECRET_KEY: ${KNOWLEDGE_SERVICE_OBJECT_STORAGE_SECRET_KEY:-knowledge-service-secret}
+      RUSTFS_ADDRESS: ":9000"
+      RUSTFS_CONSOLE_ADDRESS: ":9001"
+      RUSTFS_CONSOLE_ENABLE: "true"
+    ports:
+      - "127.0.0.1:${KNOWLEDGE_SERVICE_LOCAL_RUSTFS_PORT:-9000}:9000"
+      - "127.0.0.1:${KNOWLEDGE_SERVICE_LOCAL_RUSTFS_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - rustfs-data:/data
+
+volumes:
+  rustfs-data:
