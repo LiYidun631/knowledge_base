@@ -1,15 +1,20 @@
 import asyncio
 from types import SimpleNamespace
+from uuid import uuid4
 
+import pytest
+from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from knowledge_service.api.v1.schemas import KnowledgeBaseCreate
+from knowledge_service.api.v1.schemas import KnowledgeBaseCreate, VectorLibraryCreate
+from knowledge_service.application import companies as company_service
 from knowledge_service.application.knowledge_bases import service as knowledge_base_service
 from knowledge_service.cli import provision_catalog as catalog_cli
 from knowledge_service.cli.provision_catalog import CatalogDefinition, ModelDefinition
 from knowledge_service.infrastructure.persistence.base import Base
 from knowledge_service.infrastructure.persistence.models import (
+    Company,
     KnowledgeBase,
     ModelProfile,
 )
@@ -184,10 +189,64 @@ def test_knowledge_base_uses_default_rerank_only_when_field_is_omitted(tmp_path)
     assert explicitly_disabled.rerank_model_id is None
 
 
-def test_knowledge_base_create_schema_preserves_omitted_vs_null() -> None:
-    """请求模型保留 Rerank 字段是否由调用方显式提供。"""
-    omitted = KnowledgeBaseCreate(name="默认模型")
-    disabled = KnowledgeBaseCreate(name="关闭模型", rerank_model_id=None)
+def test_library_create_schema_allows_model_choice_but_legacy_create_does_not() -> None:
+    """新大库支持创建时选定模型；旧兼容知识库请求仍不接受模型 ID。"""
+    embedding_id, rerank_id = uuid4(), uuid4()
+    assert VectorLibraryCreate(
+        name="公司大库", embedding_model_id=embedding_id, rerank_model_id=rerank_id
+    ).model_dump() == {
+        "name": "公司大库",
+        "description": None,
+        "embedding_model_id": embedding_id,
+        "rerank_model_id": rerank_id,
+    }
+    assert KnowledgeBaseCreate(name="旧版兼容库").model_dump() == {
+        "name": "旧版兼容库",
+        "description": None,
+    }
+    with pytest.raises(ValidationError):
+        KnowledgeBaseCreate(name="旧版兼容库", rerank_model_id=None)
+    with pytest.raises(ValidationError):
+        KnowledgeBaseCreate(name="旧版兼容库", embedding_model_id=uuid4())
 
-    assert "rerank_model_id" not in omitted.model_dump(exclude_unset=True)
-    assert disabled.model_dump(exclude_unset=True)["rerank_model_id"] is None
+
+def test_company_library_binds_models_from_developer_defaults(tmp_path) -> None:
+    """创建公司大库时自动绑定已由开发配置登记的默认 Embedding 和 Rerank。"""
+
+    async def run() -> None:
+        engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'company-library.db'}")
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            async with engine.begin() as connection:
+                await connection.run_sync(Base.metadata.create_all)
+            async with session_factory() as session, session.begin():
+                company = Company(code="company-defaults", name="默认模型公司")
+                embedding = ModelProfile(
+                    name="configured-embedding",
+                    kind="embedding",
+                    provider="dashscope",
+                    model_name="text-embedding-v4",
+                    dimensions=1024,
+                    is_default=True,
+                )
+                reranker = ModelProfile(
+                    name="configured-rerank",
+                    kind="rerank",
+                    provider="dashscope",
+                    model_name="qwen3.7-text-rerank",
+                    is_default=True,
+                )
+                session.add_all([company, embedding, reranker])
+                await session.flush()
+                library = await company_service.create_vector_library(
+                    session,
+                    company_id=company.id,
+                    name="自动模型大库",
+                    description=None,
+                )
+                assert library.embedding_model_id == embedding.id
+                assert library.rerank_model_id == reranker.id
+        finally:
+            await engine.dispose()
+
+    asyncio.run(run())

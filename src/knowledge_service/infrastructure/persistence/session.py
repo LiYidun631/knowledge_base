@@ -20,6 +20,9 @@ def get_session_factory() -> async_sessionmaker[AsyncSession]:
 
 
 async def get_db_session() -> AsyncIterator[AsyncSession]:
+    # 管理端接口统一使用 Depends(get_db_session, scope="function")，让这里的 commit
+    # 在响应发出前完成；否则前端紧随其后的列表查询可能读到尚未提交的旧数据。
+    # SSE 流式接口保持默认 request 作用域，会话需覆盖整个流式生成过程。
     async with get_session_factory()() as session:
         try:
             yield session

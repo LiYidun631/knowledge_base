@@ -9,6 +9,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from knowledge_service.application.documents import ingestion
+from knowledge_service.application.documents.chunking import Chunk
 from knowledge_service.application.documents.service import register_document
 from knowledge_service.application.knowledge_bases.service import (
     create_knowledge_base,
@@ -22,11 +23,28 @@ from knowledge_service.infrastructure.persistence.base import Base
 from knowledge_service.infrastructure.persistence.models import (
     Document,
     DocumentChunk,
+    DocumentChunkTerm,
     DocumentVersion,
     IngestionJob,
     ModelProfile,
     OutboxEvent,
 )
+
+
+def test_index_text_contains_section_path_for_each_retrievable_block() -> None:
+    """正文块的 Embedding 与 BM25 文本应携带解析出的章节路径。"""
+    section = "3 正确的使用方法 / 3.1 测量步骤 / 3.1.1 耳温的测量方法"
+    chunk = Chunk(
+        id=uuid4(),
+        ordinal=0,
+        content="将探头轻轻插入耳道。",
+        page_number=None,
+        metadata={"section": section, "level": "child"},
+    )
+
+    indexed = ingestion._index_content(chunk)
+
+    assert indexed == f"章节：{section}\n将探头轻轻插入耳道。"
 
 
 @pytest.mark.parametrize("fail_once", [False, True])
@@ -124,6 +142,16 @@ def test_ingestion_completion_retry_and_duplicate_delivery(
                 assert len(chunks) == 2
                 assert len({chunk.id for chunk in chunks}) == 2
                 assert chunks[1].extra_metadata["parent_chunk_id"] == str(chunks[0].id)
+                child = next(chunk for chunk in chunks if chunk.level == "child")
+                assert child.token_count > 0
+                assert (
+                    await session.scalar(
+                        select(func.count())
+                        .select_from(DocumentChunkTerm)
+                        .where(DocumentChunkTerm.chunk_id == child.id)
+                    )
+                    > 0
+                )
             assert await ingestion.run_ingestion(job_id, factory) == "skipped"
             assert len(writes) == (2 if fail_once else 1)
         finally:

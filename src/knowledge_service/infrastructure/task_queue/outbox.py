@@ -7,7 +7,14 @@ from uuid import UUID
 
 from sqlalchemy import or_, select, text
 
-from knowledge_service.application.documents.ingestion import process_ingestion_job
+from knowledge_service.application.documents.ingestion import (
+    ingestion_job_running,
+    process_ingestion_job,
+)
+from knowledge_service.application.faq.service import (
+    FaqNotFound,
+    generate_for_document_version,
+)
 from knowledge_service.core.config import get_settings
 from knowledge_service.infrastructure.persistence.locks import ingestion_lock_name
 from knowledge_service.infrastructure.persistence.models import (
@@ -56,32 +63,73 @@ async def dispatch_once() -> int:
 
     event_id, event_type, payload, attempts = claimed
     try:
-        if event_type != "document.ingestion_requested":
-            raise ValueError("Unsupported outbox event")
-        result = await process_ingestion_job(UUID(str(payload["job_id"])))
-        async with get_session_factory()() as session:
-            async with session.begin():
-                event = await session.get(OutboxEvent, event_id, with_for_update=True)
-                if event is not None and event.status == "processing":
-                    if result == "already_running":
-                        event.status = "pending"
-                        event.available_at = utc_now() + timedelta(
-                            seconds=settings.ingestion_poll_seconds
+        if event_type == "document.ingestion_requested":
+            result = await process_ingestion_job(UUID(str(payload["job_id"])))
+            async with get_session_factory()() as session:
+                async with session.begin():
+                    event = await session.get(OutboxEvent, event_id, with_for_update=True)
+                    if event is not None and event.status == "processing":
+                        if result == "already_running":
+                            event.status = "pending"
+                            event.available_at = utc_now() + timedelta(
+                                seconds=settings.ingestion_poll_seconds
+                            )
+                        else:
+                            event.status = "published"
+                            event.published_at = utc_now()
+        elif event_type == "document.faq_generation_requested":
+            document_id = UUID(str(payload["document_id"]))
+            document_version_id = UUID(str(payload["document_version_id"]))
+            try:
+                async with get_session_factory()() as session:
+                    async with session.begin():
+                        await generate_for_document_version(
+                            session,
+                            document_id=document_id,
+                            document_version_id=document_version_id,
                         )
-                    else:
+            except FaqNotFound:
+                # 文档/版本已被删除或替换，生成目标永久消失，直接终态不再重试。
+                logger.warning(
+                    "FAQ 生成目标不存在，事件置为失败：document_id=%s", document_id
+                )
+                async with get_session_factory()() as session:
+                    async with session.begin():
+                        event = await session.get(
+                            OutboxEvent, event_id, with_for_update=True
+                        )
+                        if event is not None and event.status == "processing":
+                            event.status = "failed"
+                await recover_stale_jobs()
+                return 1
+            async with get_session_factory()() as session:
+                async with session.begin():
+                    event = await session.get(OutboxEvent, event_id, with_for_update=True)
+                    if event is not None and event.status == "processing":
                         event.status = "published"
                         event.published_at = utc_now()
+        else:
+            raise ValueError(f"Unsupported outbox event: {event_type}")
         await recover_stale_jobs()
         return 1
     except Exception:
-        logger.exception("In-process ingestion dispatch failed: event_id=%s", event_id)
+        logger.exception(
+            "In-process outbox dispatch failed: event_id=%s type=%s", event_id, event_type
+        )
         delay = min(settings.ingestion_retry_base_seconds * (2 ** min(attempts, 4)), 300)
         async with get_session_factory()() as session:
             async with session.begin():
                 event = await session.get(OutboxEvent, event_id, with_for_update=True)
                 if event is not None and event.status == "processing":
-                    event.status = "pending"
-                    event.available_at = utc_now() + timedelta(seconds=delay)
+                    # FAQ 生成失败只重试有限次数，超过后置为失败，避免永久空转。
+                    if (
+                        event_type == "document.faq_generation_requested"
+                        and attempts >= settings.max_ingestion_attempts
+                    ):
+                        event.status = "failed"
+                    else:
+                        event.status = "pending"
+                        event.available_at = utc_now() + timedelta(seconds=delay)
         return 0
 
 
@@ -102,6 +150,9 @@ async def recover_stale_jobs() -> int:
             )
             is_mysql = session.bind.dialect.name == "mysql"
             for job in jobs:
+                # 本进程仍在处理的慢任务不按超时回收，否则会与当前协程并发执行。
+                if ingestion_job_running(job.id):
+                    continue
                 lock_name = ingestion_lock_name(job.id)
                 if is_mysql:
                     acquired = await session.scalar(

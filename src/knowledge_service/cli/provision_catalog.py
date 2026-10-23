@@ -176,7 +176,7 @@ def default_catalog() -> CatalogDefinition:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="登记可供知识库选择的模型档案。")
+    parser = argparse.ArgumentParser(description="登记开发配置指定的默认及备用模型档案。")
     parser.add_argument("config", type=Path, nargs="?", help="模型目录 JSON 配置文件")
     parser.add_argument(
         "--defaults", action="store_true", help="初始化默认 Embedding 与 Rerank 档案"

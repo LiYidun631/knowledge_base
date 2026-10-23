@@ -5,7 +5,8 @@ from typing import Any
 
 import httpx
 
-from knowledge_service.core.config import get_settings, resolve_secret
+from knowledge_service.core.config import get_settings
+from knowledge_service.core.credentials import resolve_profile_api_key
 from knowledge_service.infrastructure.persistence.models import ModelProfile
 
 
@@ -34,11 +35,11 @@ async def embed_texts(profile: ModelProfile, texts: list[str]) -> list[list[floa
         raise EmbeddingProviderError("EMBEDDING_INPUT_EMPTY: Embedding 输入包含空文本")
 
     headers = {"Content-Type": "application/json"}
-    if profile.secret_ref:
-        api_key = resolve_secret(profile.secret_ref)
-        if not api_key:
-            raise EmbeddingProviderError("EMBEDDING_SECRET_MISSING: 模型密钥引用未配置")
+    api_key = resolve_profile_api_key(profile)
+    if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
+    elif profile.secret_ref or profile.api_key_cipher:
+        raise EmbeddingProviderError("EMBEDDING_SECRET_MISSING: 模型密钥未配置")
 
     request_body: dict[str, Any] = {"model": profile.model_name, "input": texts}
     if profile.provider == "dashscope" or (

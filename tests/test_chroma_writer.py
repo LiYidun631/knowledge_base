@@ -105,6 +105,33 @@ def test_collection_schema_mismatch_is_rejected_before_any_write(monkeypatch):
     assert collection.batches == []
 
 
+def test_delete_removes_every_document_version(monkeypatch):
+    collection = StubCollection()
+    profile = SimpleNamespace(id=uuid4(), dimensions=2)
+    version_ids = [uuid4(), uuid4()]
+    monkeypatch.setattr(vector_store, "_client", lambda: SimpleNamespace(
+        get_collection=lambda name: collection
+    ))
+    monkeypatch.setattr(vector_store, "collection_name", lambda embedding: "test")
+
+    vector_store.delete_document_versions(embedding=profile, version_ids=version_ids)
+
+    assert collection.deleted == [
+        {"document_version_id": str(version_id)} for version_id in version_ids
+    ]
+
+
+def test_delete_without_versions_does_not_open_chroma(monkeypatch):
+    def unexpected_client():
+        raise AssertionError("Chroma should not be opened for an empty version list")
+
+    monkeypatch.setattr(vector_store, "_client", unexpected_client)
+
+    vector_store.delete_document_versions(
+        embedding=SimpleNamespace(id=uuid4(), dimensions=2), version_ids=[]
+    )
+
+
 def test_vector_dimension_mismatch_is_rejected(monkeypatch):
     collection = StubCollection()
     client = StubClient(collection)

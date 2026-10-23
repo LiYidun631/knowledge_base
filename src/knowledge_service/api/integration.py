@@ -6,14 +6,17 @@ from typing import Any
 
 from fastapi import Depends, FastAPI
 
+from knowledge_service.api.v1.admin import router as admin_router
+from knowledge_service.api.v1.answer import router as answer_router
+from knowledge_service.api.v1.companies import router as companies_router
 from knowledge_service.api.v1.documents import router as documents_router
+from knowledge_service.api.v1.faqs import router as faqs_router
 from knowledge_service.api.v1.health import router as health_router
-from knowledge_service.api.v1.knowledge_bases import (
-    catalog_router,
-)
 from knowledge_service.api.v1.knowledge_bases import (
     router as knowledge_bases_router,
 )
+from knowledge_service.api.v1.product_catalog import router as product_catalog_router
+from knowledge_service.api.v1.search import router as search_router
 from knowledge_service.core.config import get_database_url
 from knowledge_service.infrastructure.persistence.session import get_engine
 from knowledge_service.infrastructure.task_queue.outbox import run_dispatcher
@@ -28,9 +31,15 @@ def include_knowledge_module(
     """将知识库路由挂入宿主应用，并复用宿主提供的鉴权依赖。"""
     app.include_router(health_router, prefix=api_prefix)
     dependencies = [Depends(auth_dependency)] if auth_dependency else []
-    app.include_router(catalog_router, prefix=api_prefix, dependencies=dependencies)
+    app.include_router(companies_router, prefix=api_prefix, dependencies=dependencies)
     app.include_router(knowledge_bases_router, prefix=api_prefix, dependencies=dependencies)
     app.include_router(documents_router, prefix=api_prefix, dependencies=dependencies)
+    app.include_router(search_router, prefix=api_prefix, dependencies=dependencies)
+    app.include_router(answer_router, prefix=api_prefix, dependencies=dependencies)
+    app.include_router(product_catalog_router, prefix=api_prefix, dependencies=dependencies)
+    # 管理端接口内部再校验管理员凭据，公司 Token 即使通过宿主鉴权也会被拒绝。
+    app.include_router(admin_router, prefix=api_prefix, dependencies=dependencies)
+    app.include_router(faqs_router, prefix=api_prefix, dependencies=dependencies)
     logger = logging.getLogger(__name__)
 
     async def start_ingestion() -> None:
