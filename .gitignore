@@ -16,7 +16,12 @@ dist/
 # 运行时数据：向量库与上传文件临时副本
 data/knowledge_chroma/
 data/knowledge_files/
+data/backups/
 
 # 本地临时产物、数据库备份与测试临时目录
 .qoder-tmp/
 .pytest-temp-*/
+
+# IDE 配置与权限异常的旧临时目录
+.idea/
+tmp8wlapag9/
