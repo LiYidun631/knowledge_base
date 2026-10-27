@@ -16,8 +16,12 @@ from knowledge_service.application.documents.chunking import (
     resolve_chunk_params,
 )
 from knowledge_service.application.documents.parsing import DocumentParseError, parse_document
+from knowledge_service.application.model_profiles import get_default_model_profile
 from knowledge_service.application.search.bm25 import term_frequencies
 from knowledge_service.core.config import get_settings
+from knowledge_service.core.credentials import resolve_profile_api_key
+from knowledge_service.core.ocr_runtime import OcrRuntimeConfig, use_ocr_runtime
+from knowledge_service.domain.errors import CredentialEncryptionError
 from knowledge_service.infrastructure.chroma.vector_store import (
     ChromaWriteError,
     upsert_chunks,
@@ -82,6 +86,7 @@ async def run_ingestion(job_id: UUID, factory: async_sessionmaker[AsyncSession])
     settings = get_settings()
     claimed = False
     created_asset_keys: list[str] = []
+    ocr_runtime: OcrRuntimeConfig | None = None
     try:
         async with factory() as session:
             async with session.begin():
@@ -135,6 +140,25 @@ async def run_ingestion(job_id: UUID, factory: async_sessionmaker[AsyncSession])
                         document.status = "failed"
                         document.error_message = version.error_message
                     return "failed"
+                # OCR 为全局默认档案；未配置时解析器继续回落到 .env 视觉模型。
+                ocr_profile = await get_default_model_profile(session, kind="ocr")
+                if ocr_profile is not None:
+                    try:
+                        ocr_api_key = resolve_profile_api_key(ocr_profile)
+                    except CredentialEncryptionError:
+                        # 仅当文档确实需要 OCR 时再报密钥错误，避免纯文本文档入库被阻断。
+                        ocr_api_key = None
+                    ocr_runtime = OcrRuntimeConfig(
+                        base_url=str(ocr_profile.settings.get("base_url", "")),
+                        chat_path=str(
+                            ocr_profile.settings.get("chat_path", "/chat/completions")
+                        ),
+                        model_name=ocr_profile.model_name,
+                        api_key=ocr_api_key,
+                        mode=str(ocr_profile.settings.get("ocr_mode", "auto")),
+                        profile_name=ocr_profile.name,
+                        settings=dict(ocr_profile.settings),
+                    )
                 job.status = "running"
                 job.attempts += 1
                 job.stage = "load"
@@ -177,7 +201,8 @@ async def run_ingestion(job_id: UUID, factory: async_sessionmaker[AsyncSession])
             raise IngestionFailure("OBJECT_CHECKSUM_MISMATCH", "原始文件校验失败")
 
         await _set_stage(job_id, "parse", factory)
-        blocks = await asyncio.to_thread(parse_document, filename, content)
+        with use_ocr_runtime(ocr_runtime):
+            blocks = await asyncio.to_thread(parse_document, filename, content)
         # 图片先写入与原始文件相同的存储后端，解析文本只保存对象 key，避免把二进制写进 MySQL。
         storage = get_object_storage(settings)
         asset_records: list[dict[str, object]] = []
@@ -422,7 +447,7 @@ async def run_ingestion(job_id: UUID, factory: async_sessionmaker[AsyncSession])
             # 领取事务失败尚无任务状态可修复，交由队列重新投递。
             raise
         code, message = _failure_details(exc)
-        # 数据库提交前失败时清理已上传图片，避免本地目录或 RustFS 留下孤儿对象。
+        # 数据库提交前失败时清理已上传图片，避免本地目录或 OSS 留下孤儿对象。
         if created_asset_keys:
             storage = get_object_storage(settings)
             for asset_key in created_asset_keys:

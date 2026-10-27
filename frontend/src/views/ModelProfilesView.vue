@@ -14,12 +14,24 @@ interface ModelPreset {
   known_chat_models: string[]
   note: string | null
   known_models: string[]
+  supports_rerank: boolean
+  rerank_path: string | null
+  rerank_base_url: string | null
+  known_rerank_models: string[]
+  supports_ocr: boolean
+  ocr_path: string | null
+  ocr_base_url: string | null
+  ocr_mode: 'auto' | 'vision' | 'paddleocr' | 'baidu_async' | null
+  known_ocr_models: string[]
 }
+
+type ProfileKind = 'embedding' | 'rerank' | 'chat' | 'ocr'
+type OcrMode = 'auto' | 'vision' | 'paddleocr' | 'baidu_async'
 
 interface ModelProfile {
   id: string
   name: string
-  kind: 'embedding' | 'rerank' | 'chat'
+  kind: ProfileKind
   provider: string
   model_name: string
   dimensions: number | null
@@ -34,34 +46,111 @@ interface ModelProfile {
 
 interface ProfileTestResult {
   ok: boolean
-  kind: 'embedding' | 'rerank' | 'chat'
+  kind: ProfileKind
   latency_ms: number
   message: string
   error_code: string | null
 }
 
+type UsageSlotKey = 'embedding' | 'rerank' | 'chat' | 'ocr'
+type UsageSource = 'knowledge_base' | 'default' | 'environment'
+
+interface ModelUsageItem {
+  profile_id: string | null
+  name: string
+  provider: string
+  model_name: string
+  source: UsageSource
+  scope_names: string[]
+  is_default: boolean
+  is_active: boolean
+  is_enabled: boolean
+}
+
+interface ModelUsageSlot {
+  key: UsageSlotKey
+  items: ModelUsageItem[]
+}
+
+const SLOT_META: Record<UsageSlotKey, { label: string; desc: string; empty: string }> = {
+  embedding: {
+    label: '文档向量化与检索',
+    desc: '文档入库切片向量化、在线提问向量化、FAQ 问题匹配',
+    empty: '暂无生效的 Embedding 模型，新建知识库将无法入库。',
+  },
+  rerank: {
+    label: '检索结果重排',
+    desc: '混合检索候选按相关度重排，子库未绑定时跳过',
+    empty: '没有子库绑定 Rerank 模型，检索结果按原顺序返回。',
+  },
+  chat: {
+    label: '问答与 FAQ 生成 / 改写',
+    desc: '在线问答答案生成、FAQ 自动生成、FAQ AI 改写',
+    empty: '暂无可用生成模型，问答与 FAQ 生成、改写均不可用。',
+  },
+  ocr: {
+    label: '扫描件与图片识别',
+    desc: '扫描版 PDF 与 Office 内嵌图片的文字识别',
+    empty: '未配置 OCR 模型，扫描件与图片无法提取文字。',
+  },
+}
+
+const SOURCE_META: Record<UsageSource, { label: string; type: 'primary' | 'warning' | 'info' }> = {
+  knowledge_base: { label: '知识库绑定', type: 'primary' },
+  default: { label: '默认档案', type: 'warning' },
+  environment: { label: '环境配置', type: 'info' },
+}
+
+const KIND_USAGE: Record<ProfileKind, string> = {
+  embedding: '入库 / 检索 / FAQ 匹配',
+  rerank: '检索重排',
+  chat: '问答 / FAQ 生成改写',
+  ocr: '扫描件 / 图片识别',
+}
+
+const OCR_MODE_OPTIONS: { value: OcrMode; label: string }[] = [
+  { value: 'auto', label: '自动识别（按模型名）' },
+  { value: 'vision', label: '视觉对话接口' },
+  { value: 'paddleocr', label: 'PaddleOCR 同步接口' },
+  { value: 'baidu_async', label: '百度官方异步任务' },
+]
+
+const OCR_MODE_LABELS: Record<OcrMode, string> = {
+  auto: '自动识别',
+  vision: '视觉对话',
+  paddleocr: 'PaddleOCR 同步',
+  baidu_async: '百度异步任务',
+}
+
 interface ProfileForm {
   name: string
-  kind: 'embedding' | 'rerank' | 'chat'
+  kind: ProfileKind
   provider: string
   model_name: string
   dimensions: number | null
   base_url: string
   path: string
+  ocr_mode: OcrMode
   batch_size: number
   secret_ref: string
+  api_key: string
   is_enabled: boolean
+  // 编辑时保留表单未覆盖的档案参数（如异步 OCR 的轮询与版面选项）。
+  extraSettings: Record<string, unknown>
 }
 
-const activeTab = ref('profiles')
+const activeTab = ref('usage')
 const presets = ref<ModelPreset[]>([])
 const profiles = ref<ModelProfile[]>([])
+const usageSlots = ref<ModelUsageSlot[]>([])
 const loading = ref(false)
+const usageLoading = ref(false)
 const presetLoading = ref(false)
 
 const dialogVisible = ref(false)
 const editingId = ref<string | null>(null)
 const submitting = ref(false)
+const promoteDefault = ref(false)
 const form = reactive<ProfileForm>(emptyForm())
 
 const keyDialogVisible = ref(false)
@@ -72,25 +161,40 @@ const testingId = ref<string | null>(null)
 
 const providerOptions = computed(() =>
   presets.value
-    .filter((preset) =>
-      form.kind === 'chat' ? preset.supports_chat : preset.supports_embedding,
-    )
+    .filter((preset) => supportsKind(preset, form.kind))
     .map((preset) => ({ value: preset.key, label: preset.display_name })),
+)
+
+const editingProfileHasKey = computed(
+  () => profiles.value.find((profile) => profile.id === editingId.value)?.has_api_key ?? false,
 )
 
 const secretRefOptions = ['dashscope', 'bigmodel', 'volcengine', 'deepseek', 'qianfan'].map(
   (value) => ({ value, label: value }),
 )
 
-const modelNamePlaceholder = computed(() =>
-  form.kind === 'chat'
-    ? '供应商控制台中的生成模型名'
-    : '供应商控制台中的模型名或 Endpoint ID',
+const modelNamePlaceholder = computed(() => {
+  if (form.kind === 'chat') return '供应商控制台中的生成模型名'
+  if (form.kind === 'ocr') return '例如 qwen-vl-ocr、paddleocr-vl-0.9b 或 Endpoint ID'
+  return '供应商控制台中的模型名或 Endpoint ID'
+})
+
+const pathLabel = computed(
+  () =>
+    ({
+      embedding: 'Embedding 路径',
+      chat: 'Chat 路径',
+      rerank: 'Rerank 路径',
+      ocr: '视觉接口路径',
+    })[form.kind],
 )
 
-const pathLabel = computed(() =>
-  form.kind === 'chat' ? 'Chat 路径' : form.kind === 'rerank' ? 'Rerank 路径' : 'Embedding 路径',
-)
+function supportsKind(preset: ModelPreset, kind: ProfileKind): boolean {
+  if (kind === 'embedding') return preset.supports_embedding
+  if (kind === 'chat') return preset.supports_chat
+  if (kind === 'rerank') return preset.supports_rerank
+  return preset.supports_ocr
+}
 
 function emptyForm(): ProfileForm {
   return {
@@ -101,9 +205,12 @@ function emptyForm(): ProfileForm {
     dimensions: null,
     base_url: '',
     path: '/embeddings',
+    ocr_mode: 'auto',
     batch_size: 1,
     secret_ref: '',
+    api_key: '',
     is_enabled: true,
+    extraSettings: {},
   }
 }
 
@@ -129,37 +236,126 @@ async function loadProfiles() {
   }
 }
 
+async function loadUsage() {
+  usageLoading.value = true
+  try {
+    usageSlots.value = (await client.get('/admin/model-usage')).data.slots
+  } catch (error) {
+    errorMessage(error, '加载模型调用位置失败')
+  } finally {
+    usageLoading.value = false
+  }
+}
+
+async function refreshAll() {
+  await Promise.all([loadProfiles(), loadUsage()])
+}
+
+function kindUsage(kind: string): string {
+  return KIND_USAGE[kind as keyof typeof KIND_USAGE] ?? ''
+}
+
+function usageStatus(item: ModelUsageItem) {
+  if (!item.model_name.trim()) return { label: '未配置', type: 'info' as const }
+  if (!item.is_enabled) return { label: '已停用', type: 'info' as const }
+  if (!item.is_active) return { label: '未生效', type: 'info' as const }
+  return { label: '生效中', type: 'success' as const }
+}
+
+function scopeLabel(item: ModelUsageItem): string {
+  if (!item.model_name.trim()) return '说明'
+  return item.scope_names.length ? '用于' : '范围'
+}
+
+function scopeText(item: ModelUsageItem, slotKey: UsageSlotKey): string {
+  if (!item.model_name.trim()) return '未配置，可在模型档案中新建并在 .env 补充环境兜底'
+  if (item.scope_names.length > 3) {
+    return `${item.scope_names.slice(0, 3).join('、')} 等 ${item.scope_names.length} 个子库`
+  }
+  if (item.scope_names.length) return item.scope_names.join('、')
+  if (item.source === 'environment') {
+    if (slotKey === 'chat') return '默认 Chat 档案缺失时全局兜底'
+    if (slotKey === 'ocr') return '默认 OCR 档案缺失时全局兜底'
+    return '服务全局'
+  }
+  if (item.source === 'default') {
+    return slotKey === 'chat' || slotKey === 'ocr' ? '全局生效' : '新建知识库时沿用'
+  }
+  return ''
+}
+
 function applyPreset(provider: string) {
   const preset = presets.value.find((item) => item.key === provider)
   if (!preset) return
-  form.base_url = preset.base_url
-  if (form.kind === 'embedding') form.path = preset.embedding_path
-  else if (form.kind === 'chat') form.path = preset.chat_path ?? '/chat/completions'
-  else form.path = '/reranks'
+  if (form.kind === 'embedding') {
+    form.base_url = preset.base_url
+    form.path = preset.embedding_path
+  } else if (form.kind === 'chat') {
+    form.base_url = preset.base_url
+    form.path = preset.chat_path ?? '/chat/completions'
+  } else if (form.kind === 'rerank') {
+    form.base_url = preset.rerank_base_url ?? preset.base_url
+    form.path = preset.rerank_path ?? '/reranks'
+  } else {
+    form.base_url = preset.ocr_base_url ?? preset.base_url
+    form.path = preset.ocr_path ?? '/chat/completions'
+    form.ocr_mode = preset.ocr_mode ?? 'auto'
+  }
 }
 
 function switchKind() {
   form.dimensions = null
   form.batch_size = 1
-  const preset = presets.value.find((item) => item.key === form.provider)
-  if (form.kind === 'embedding') {
-    form.path = preset?.embedding_path ?? '/embeddings'
-  } else if (form.kind === 'chat') {
-    form.path = preset?.chat_path ?? '/chat/completions'
-  } else {
-    form.path = '/reranks'
+  form.ocr_mode = 'auto'
+  form.extraSettings = {}
+  const current = presets.value.find((item) => item.key === form.provider)
+  if (!current || !supportsKind(current, form.kind)) {
+    // 切换类型后优先保留当前厂商；不支持时回落到 dashscope 或首个可用厂商。
+    form.provider =
+      presets.value.find(
+        (item) => item.key === 'dashscope' && supportsKind(item, form.kind),
+      )?.key ??
+      presets.value.find((item) => supportsKind(item, form.kind))?.key ??
+      form.provider
   }
+  applyPreset(form.provider)
 }
 
 function openCreate() {
   Object.assign(form, emptyForm())
   editingId.value = null
+  promoteDefault.value = false
+  applyPreset(form.provider)
   dialogVisible.value = true
+}
+
+function onOcrModeChange(mode: OcrMode) {
+  // 异步任务固定走百度 AIP，避免沿用千帆 v2 基址导致 404。
+  if (mode === 'baidu_async' && !form.base_url.includes('aip.baidubce.com')) {
+    form.base_url = 'https://aip.baidubce.com'
+  }
+}
+
+function ocrModeLabel(value: string | null): string {
+  if (!value) return '—'
+  return OCR_MODE_LABELS[value as OcrMode] ?? value
 }
 
 function openEdit(profile: ModelProfile) {
   editingId.value = profile.id
-  const settings = profile.settings ?? {}
+  promoteDefault.value = false
+  const settings = { ...(profile.settings ?? {}) }
+  const extraSettings = { ...settings }
+  for (const key of [
+    'base_url',
+    'embedding_path',
+    'batch_size',
+    'chat_path',
+    'rerank_path',
+    'ocr_mode',
+  ]) {
+    delete extraSettings[key]
+  }
   Object.assign(form, {
     name: profile.name,
     kind: profile.kind,
@@ -172,21 +368,32 @@ function openEdit(profile: ModelProfile) {
         ? String(settings.embedding_path ?? '/embeddings')
         : profile.kind === 'chat'
           ? String(settings.chat_path ?? '/chat/completions')
-          : String(settings.rerank_path ?? '/reranks'),
+          : profile.kind === 'ocr'
+            ? String(settings.chat_path ?? '/chat/completions')
+            : String(settings.rerank_path ?? '/reranks'),
+    ocr_mode: (String(settings.ocr_mode ?? 'auto') as OcrMode) || 'auto',
     batch_size: Number(settings.batch_size ?? 1),
     secret_ref: profile.secret_ref ?? '',
+    api_key: '',
     is_enabled: profile.is_enabled,
+    extraSettings,
   })
   dialogVisible.value = true
 }
 
 function buildPayload() {
-  const settings: Record<string, unknown> = { base_url: form.base_url }
+  const settings: Record<string, unknown> = {
+    ...form.extraSettings,
+    base_url: form.base_url,
+  }
   if (form.kind === 'embedding') {
     settings.embedding_path = form.path
     settings.batch_size = form.batch_size
   } else if (form.kind === 'chat') {
     settings.chat_path = form.path
+  } else if (form.kind === 'ocr') {
+    settings.chat_path = form.path
+    settings.ocr_mode = form.ocr_mode
   } else {
     settings.rerank_path = form.path
   }
@@ -204,15 +411,31 @@ function buildPayload() {
 async function submitProfile() {
   submitting.value = true
   try {
-    if (editingId.value) {
-      await client.patch(`/admin/model-profiles/${editingId.value}`, buildPayload())
-      ElMessage.success('模型档案已更新')
+    let profileId = editingId.value
+    if (profileId) {
+      await client.patch(`/admin/model-profiles/${profileId}`, buildPayload())
     } else {
-      await client.post('/admin/model-profiles', { ...buildPayload(), kind: form.kind })
-      ElMessage.success('模型档案已创建')
+      const { data } = await client.post<ModelProfile>('/admin/model-profiles', {
+        ...buildPayload(),
+        kind: form.kind,
+      })
+      profileId = data.id
     }
+    const key = form.api_key.trim()
+    if (key) {
+      // 密钥只写不回读；档案已保存时即使密钥失败也保留档案，提示稍后补配。
+      try {
+        await client.put(`/admin/model-profiles/${profileId}/api-key`, { api_key: key })
+      } catch {
+        ElMessage.warning('档案已保存，但 API Key 写入失败，请在列表中重新配置')
+      }
+    }
+    if (promoteDefault.value && profileId) {
+      await client.post(`/admin/model-profiles/${profileId}/default`)
+    }
+    ElMessage.success(editingId.value ? '模型档案已更新' : '模型档案已创建')
     dialogVisible.value = false
-    await loadProfiles()
+    await refreshAll()
   } catch (error) {
     errorMessage(error, '保存模型档案失败')
   } finally {
@@ -245,6 +468,7 @@ async function toggleEnabled(profile: ModelProfile, value: string | number | boo
     // PATCH 只提交单字段，服务端与当前值合并后整体校验。
     await client.patch(`/admin/model-profiles/${profile.id}`, { is_enabled: Boolean(value) })
     profile.is_enabled = Boolean(value)
+    await loadUsage()
   } catch (error) {
     errorMessage(error, '切换启用状态失败')
     await loadProfiles()
@@ -254,7 +478,7 @@ async function toggleEnabled(profile: ModelProfile, value: string | number | boo
 async function setDefault(profile: ModelProfile) {
   try {
     await client.post(`/admin/model-profiles/${profile.id}/default`)
-    await loadProfiles()
+    await refreshAll()
   } catch (error) {
     errorMessage(error, '设为默认失败')
   }
@@ -263,7 +487,7 @@ async function setDefault(profile: ModelProfile) {
 async function clearDefault(profile: ModelProfile) {
   try {
     await client.delete(`/admin/model-profiles/${profile.id}/default`)
-    await loadProfiles()
+    await refreshAll()
   } catch (error) {
     errorMessage(error, '取消默认失败')
   }
@@ -282,7 +506,7 @@ async function removeProfile(profile: ModelProfile) {
   try {
     await client.delete(`/admin/model-profiles/${profile.id}`)
     ElMessage.success('已删除')
-    await loadProfiles()
+    await refreshAll()
   } catch (error) {
     errorMessage(error, '删除失败')
   }
@@ -344,9 +568,34 @@ function settingsText(profile: ModelProfile): string {
     .join(' ')
 }
 
+function editUsageModel(item: ModelUsageItem) {
+  const profile = profiles.value.find((candidate) => candidate.id === item.profile_id)
+  if (!profile) {
+    ElMessage.info('档案列表正在刷新，请稍后再试')
+    loadProfiles()
+    return
+  }
+  openEdit(profile)
+}
+
+function adoptEnvironmentModel(slotKey: UsageSlotKey, item: ModelUsageItem) {
+  Object.assign(form, emptyForm())
+  editingId.value = null
+  form.kind = slotKey
+  form.provider = item.provider || 'dashscope'
+  form.model_name = item.model_name
+  // 环境配置的 provider 即 secret_ref 约定名，预填后可直接复用 .env 中的密钥。
+  form.secret_ref = item.provider
+  form.name =
+    slotKey === 'chat' ? '默认生成模型' : slotKey === 'ocr' ? '默认 OCR 模型' : ''
+  promoteDefault.value = true
+  applyPreset(form.provider)
+  dialogVisible.value = true
+}
+
 onMounted(() => {
   loadPresets()
-  loadProfiles()
+  refreshAll()
 })
 </script>
 
@@ -355,30 +604,103 @@ onMounted(() => {
     <template #header>
       <div class="header">
         <span class="header-title"><el-icon><Cpu /></el-icon>模型管理</span>
-        <el-button @click="loadProfiles()">刷新</el-button>
+        <el-button :loading="loading || usageLoading" @click="refreshAll()">刷新</el-button>
       </div>
     </template>
 
-    <el-alert
-      type="info"
-      :closable="false"
-      show-icon
-      title="模型档案在大库创建时锁定；已被大库/子库绑定的档案不可修改或删除，换模型需新建大库。"
-      class="tip"
-    />
-
     <el-tabs v-model="activeTab">
+      <el-tab-pane label="调用位置" name="usage">
+        <p class="usage-head">
+          汇总服务实际调用的全部模型；档案可直接编辑，环境配置项可新建默认档案替换，无需重启。
+        </p>
+        <div v-loading="usageLoading" class="usage-list">
+          <div v-for="slot in usageSlots" :key="slot.key" class="usage-row">
+            <div class="usage-slot">
+              <div class="usage-slot-title">{{ SLOT_META[slot.key].label }}</div>
+              <div class="usage-slot-desc">{{ SLOT_META[slot.key].desc }}</div>
+            </div>
+            <div class="usage-models">
+              <div
+                v-for="item in slot.items"
+                :key="`${slot.key}-${item.profile_id ?? item.source}`"
+                class="usage-model"
+                :class="{ 'is-inactive': usageStatus(item).label !== '生效中' }"
+              >
+                <div class="usage-model-main">
+                  <span class="usage-model-name">{{ item.name }}</span>
+                  <el-tag size="small" effect="plain" :type="SOURCE_META[item.source].type">
+                    {{ SOURCE_META[item.source].label }}
+                  </el-tag>
+                  <el-tag v-if="item.is_default" size="small" type="danger" effect="plain">
+                    默认
+                  </el-tag>
+                  <el-tag size="small" effect="plain" :type="usageStatus(item).type">
+                    {{ usageStatus(item).label }}
+                  </el-tag>
+                  <span class="usage-model-actions">
+                    <el-button
+                      v-if="item.profile_id"
+                      link
+                      type="primary"
+                      size="small"
+                      @click="editUsageModel(item)"
+                    >
+                      编辑
+                    </el-button>
+                    <el-button
+                      v-else
+                      link
+                      type="primary"
+                      size="small"
+                      @click="adoptEnvironmentModel(slot.key, item)"
+                    >
+                      接入管理
+                    </el-button>
+                  </span>
+                </div>
+                <div class="usage-model-meta">
+                  <span>{{ item.provider || '未指定供应商' }}</span>
+                  <span class="meta-dot">·</span>
+                  <span class="usage-model-id">{{ item.model_name || '未配置模型名' }}</span>
+                </div>
+                <div v-if="scopeText(item, slot.key)" class="usage-model-scope">
+                  <span class="scope-label">{{ scopeLabel(item) }}</span>
+                  {{ scopeText(item, slot.key) }}
+                </div>
+              </div>
+              <div v-if="!slot.items.length" class="usage-empty">
+                {{ SLOT_META[slot.key].empty }}
+              </div>
+            </div>
+          </div>
+          <div v-if="!usageSlots.length && !usageLoading" class="usage-empty">
+            暂无模型调用信息。
+          </div>
+        </div>
+      </el-tab-pane>
+
       <el-tab-pane label="模型档案" name="profiles">
+        <el-alert
+          type="info"
+          :closable="false"
+          show-icon
+          title="模型档案在大库创建时锁定；已被大库/子库绑定的档案不可修改或删除，换模型需新建大库。"
+          class="tip"
+        />
         <div class="toolbar">
           <el-button type="primary" @click="openCreate">新建档案</el-button>
         </div>
         <el-table v-loading="loading" :data="profiles" border>
           <el-table-column prop="name" label="名称" min-width="160" />
-          <el-table-column label="类型" width="110">
+          <el-table-column label="类型与用途" width="160">
             <template #default="{ row }">
-              <el-tag v-if="row.kind === 'embedding'" type="info">Embedding</el-tag>
-              <el-tag v-else-if="row.kind === 'chat'" type="success">Chat 生成</el-tag>
-              <el-tag v-else type="warning">Rerank</el-tag>
+              <div class="kind-cell">
+                <el-tag v-if="row.kind === 'embedding'" type="info">Embedding</el-tag>
+                <el-tag v-else-if="row.kind === 'chat'" type="success">Chat 生成</el-tag>
+                <el-tag v-else-if="row.kind === 'ocr'" type="primary">OCR</el-tag>
+                <el-tag v-else type="warning">Rerank</el-tag>
+                <span class="kind-usage">{{ kindUsage(row.kind) }}</span>
+              </div>
             </template>
           </el-table-column>
           <el-table-column prop="provider" label="服务商" width="130" />
@@ -470,6 +792,35 @@ onMounted(() => {
           <el-table-column label="常见生成模型" min-width="180">
             <template #default="{ row }">{{ (row.known_chat_models ?? []).join('、') }}</template>
           </el-table-column>
+          <el-table-column prop="rerank_path" label="Rerank 路径" min-width="120" />
+          <el-table-column label="Rerank" width="90">
+            <template #default="{ row }">
+              <el-tag :type="row.supports_rerank ? 'success' : 'info'">
+                {{ row.supports_rerank ? '支持' : '不支持' }}
+              </el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="常见重排模型" min-width="170">
+            <template #default="{ row }">
+              {{ (row.known_rerank_models ?? []).join('、') || '—' }}
+            </template>
+          </el-table-column>
+          <el-table-column prop="ocr_path" label="OCR 视觉路径" min-width="140" />
+          <el-table-column prop="ocr_mode" label="OCR 模式" width="110">
+            <template #default="{ row }">{{ ocrModeLabel(row.ocr_mode) }}</template>
+          </el-table-column>
+          <el-table-column label="OCR" width="80">
+            <template #default="{ row }">
+              <el-tag :type="row.supports_ocr ? 'success' : 'info'">
+                {{ row.supports_ocr ? '支持' : '不支持' }}
+              </el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="常见 OCR 模型" min-width="200">
+            <template #default="{ row }">
+              {{ (row.known_ocr_models ?? []).join('、') || '—' }}
+            </template>
+          </el-table-column>
           <el-table-column prop="note" label="说明" min-width="180" />
         </el-table>
       </el-tab-pane>
@@ -481,6 +832,14 @@ onMounted(() => {
       width="560px"
     >
       <el-form label-width="110px">
+        <el-alert
+          v-if="promoteDefault"
+          type="info"
+          :closable="false"
+          show-icon
+          title="保存后会设为该类型的默认模型，替换当前生效的环境配置。"
+          class="tip"
+        />
         <el-form-item label="名称" required>
           <el-input v-model="form.name" placeholder="例如 aliyun-dashscope-embedding-v4" />
         </el-form-item>
@@ -489,6 +848,7 @@ onMounted(() => {
             <el-radio-button value="embedding">Embedding</el-radio-button>
             <el-radio-button value="rerank">Rerank</el-radio-button>
             <el-radio-button value="chat">Chat 生成</el-radio-button>
+            <el-radio-button value="ocr">OCR</el-radio-button>
           </el-radio-group>
         </el-form-item>
         <el-form-item label="服务商" required>
@@ -520,8 +880,46 @@ onMounted(() => {
         <el-form-item :label="pathLabel">
           <el-input v-model="form.path" />
         </el-form-item>
+        <el-form-item v-if="form.kind === 'ocr'" label="OCR 模式">
+          <el-select v-model="form.ocr_mode" style="width: 100%" @change="onOcrModeChange">
+            <el-option
+              v-for="option in OCR_MODE_OPTIONS"
+              :key="option.value"
+              :label="option.label"
+              :value="option.value"
+            />
+          </el-select>
+          <div class="form-hint">
+            自动按模型名判断；PaddleOCR 同步接口使用基址下的 /ocr/paddleocr；
+            百度异步任务使用 AIP（https://aip.baidubce.com），适合长文档与跨页表格。
+          </div>
+        </el-form-item>
         <el-form-item v-if="form.kind === 'embedding'" label="批量大小">
           <el-input-number v-model="form.batch_size" :min="1" style="width: 100%" />
+        </el-form-item>
+        <el-form-item label="API Key">
+          <el-input
+            v-model="form.api_key"
+            type="password"
+            show-password
+            :placeholder="
+              form.kind === 'ocr' && form.ocr_mode === 'baidu_async'
+                ? editingId && editingProfileHasKey
+                  ? '已配置，留空保持不变'
+                  : '填写 API Key:Secret Key'
+                : editingId
+                  ? editingProfileHasKey
+                    ? '已配置，留空保持不变'
+                    : '填写供应商 API Key'
+                  : '填写供应商 API Key（可稍后配置）'
+            "
+          />
+          <div class="form-hint">
+            密钥加密保存，保存后不会回显；也可在列表中单独配置。
+            <template v-if="form.kind === 'ocr' && form.ocr_mode === 'baidu_async'">
+              百度异步 OCR 使用文字识别控制台「应用列表」中的 API Key 与 Secret Key，用英文冒号连接，例如 API Key:Secret Key；不是 IAM 安全认证里的 Access Key。
+            </template>
+          </div>
         </el-form-item>
         <el-form-item label="环境密钥引用">
           <el-select
@@ -592,9 +990,129 @@ onMounted(() => {
 .toolbar {
   margin-bottom: 12px;
 }
+.usage-head {
+  margin: 0 0 8px;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+.usage-list {
+  min-height: 120px;
+}
+.usage-row {
+  display: grid;
+  grid-template-columns: 200px minmax(0, 1fr);
+  gap: 24px;
+  padding: 16px 4px;
+  border-top: 1px solid var(--el-border-color-lighter);
+}
+.usage-row:first-child {
+  border-top: none;
+  padding-top: 4px;
+}
+.usage-slot-title {
+  display: flex;
+  align-items: center;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--el-text-color-primary);
+}
+.usage-slot-title::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  margin-right: 8px;
+  border-radius: 2px;
+  background: var(--el-color-primary);
+}
+.usage-slot-desc {
+  margin-top: 6px;
+  padding-left: 14px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--el-text-color-secondary);
+}
+.usage-models {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.usage-model {
+  padding: 10px 14px;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 8px;
+  background: var(--el-fill-color-very-light);
+}
+.usage-model.is-inactive {
+  opacity: 0.62;
+}
+.usage-model-main {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.usage-model-actions {
+  display: inline-flex;
+  margin-left: auto;
+}
+.usage-model-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--el-text-color-primary);
+}
+.usage-model-meta {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+.usage-model-id {
+  font-family: var(--el-font-family-mono, ui-monospace, SFMono-Regular, Consolas, monospace);
+  color: var(--el-text-color-regular);
+}
+.meta-dot {
+  margin: 0 6px;
+  color: var(--el-text-color-placeholder);
+}
+.usage-model-scope {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--el-text-color-regular);
+}
+.scope-label {
+  margin-right: 6px;
+  color: var(--el-text-color-secondary);
+}
+.usage-empty {
+  padding: 10px 0;
+  font-size: 12px;
+  color: var(--el-text-color-placeholder);
+}
+.kind-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+}
+.kind-usage {
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--el-text-color-secondary);
+}
+@media (max-width: 900px) {
+  .usage-row {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 10px;
+  }
+}
 .key-hint {
   margin: 0 0 12px;
   font-size: 13px;
+  color: var(--el-text-color-secondary);
+}
+.form-hint {
+  margin-top: 4px;
+  font-size: 12px;
+  line-height: 1.5;
   color: var(--el-text-color-secondary);
 }
 </style>

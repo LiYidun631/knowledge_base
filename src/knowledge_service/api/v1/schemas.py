@@ -1,3 +1,4 @@
+import re
 from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID
@@ -278,6 +279,208 @@ class QARecordReviewPatch(BaseModel):
     )
 
 
+class ProjectTraceCompletionRequest(BaseModel):
+    """外部项目回答完成后回填轨迹；检索记录缺失时按此内容补建轨迹。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    query: str = Field(
+        min_length=1, max_length=4000, description="用户原始问题；轨迹缺失时用于补建。"
+    )
+    answer: str | None = Field(default=None, description="项目最终回答；未生成时可省略。")
+    status: Literal["success", "no_results", "failed", "clarification"] = Field(
+        description="项目侧最终状态。"
+    )
+    answer_mode: str | None = Field(
+        default=None,
+        max_length=40,
+        description="回答路径，例如 rag、direct、clarification、chat。",
+    )
+    intent: dict[str, Any] | None = Field(
+        default=None, description="项目侧意图识别结果，原样保存。"
+    )
+    chat_provider: str | None = Field(default=None, max_length=80, description="生成模型供应商。")
+    chat_model_name: str | None = Field(
+        default=None, max_length=200, description="生成模型名称。"
+    )
+    generation_duration_ms: int | None = Field(
+        default=None, ge=0, description="答案生成耗时，单位毫秒。"
+    )
+    total_duration_ms: int | None = Field(
+        default=None, ge=0, description="项目侧总耗时，单位毫秒。"
+    )
+    prompt_tokens: int | None = Field(default=None, ge=0, description="输入 token 数。")
+    completion_tokens: int | None = Field(default=None, ge=0, description="输出 token 数。")
+    total_tokens: int | None = Field(default=None, ge=0, description="总 token 数。")
+    error_code: str | None = Field(default=None, max_length=100, description="失败错误代码。")
+    error_message: str | None = Field(default=None, description="失败错误摘要。")
+    extra_metadata: dict[str, Any] | None = Field(
+        default=None, description="项目侧补充信息，例如直出分数、命中规则。"
+    )
+
+
+class ProjectTraceCompletionRead(BaseModel):
+    """回填结果；返回轨迹 ID 与最终状态。"""
+
+    id: UUID = Field(description="项目轨迹 ID。")
+    status: str = Field(description="轨迹最终状态。")
+    finished_at: datetime | None = Field(description="完成时间；进行中为空。")
+
+
+class ProjectRead(BaseModel):
+    """已登记接入项目。"""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID = Field(description="项目 ID。")
+    project_key: str = Field(description="项目标识，调用方通过 X-Project-Key 传入。")
+    display_name: str = Field(description="项目展示名称。")
+    description: str | None = Field(description="项目说明。")
+    is_enabled: bool = Field(description="是否接收轨迹记录。")
+    retention_days: int = Field(description="轨迹保留天数。")
+    created_at: datetime = Field(description="登记时间。")
+    updated_at: datetime = Field(description="最后更新时间。")
+
+
+class ProjectCreate(BaseModel):
+    """登记接入项目；项目标识必须与调用方 X-Project-Key 完全一致。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    project_key: str = Field(
+        min_length=2,
+        max_length=80,
+        description="项目标识，仅限字母、数字及 _ . : -，登记后不可修改。",
+    )
+    display_name: str = Field(min_length=1, max_length=160, description="项目展示名称。")
+    description: str | None = Field(
+        default=None, max_length=1000, description="项目说明，可选。"
+    )
+    retention_days: int = Field(
+        default=90, ge=1, le=3650, description="轨迹保留天数，默认 90 天。"
+    )
+
+    @field_validator("project_key")
+    @classmethod
+    def normalize_project_key(cls, value: str) -> str:
+        """标识会用于请求头比对，只允许安全字符并拒绝空白。"""
+        value = value.strip()
+        if not re.fullmatch(r"[A-Za-z0-9_.:-]{2,80}", value):
+            raise ValueError("项目标识仅支持字母、数字及 _ . : -，长度 2-80")
+        return value
+
+    @field_validator("display_name")
+    @classmethod
+    def normalize_display_name(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("项目名称不能为空")
+        return value
+
+    @field_validator("description")
+    @classmethod
+    def normalize_description(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        return value or None
+
+
+class ProjectTraceRead(BaseModel):
+    """项目轨迹列表摘要；正文快照与完整答案在详情中返回。"""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID = Field(description="轨迹 ID。")
+    project_id: UUID = Field(description="所属项目 ID。")
+    company_id: UUID = Field(description="所属公司 ID。")
+    knowledge_base_id: UUID = Field(description="检索使用的知识库 ID。")
+    external_request_id: str = Field(description="调用方请求 ID。")
+    session_ref: str | None = Field(description="调用方会话标识。")
+    user_ref: str | None = Field(description="调用方用户标识哈希。")
+    query: str = Field(description="用户问题。")
+    status: str = Field(
+        description="轨迹状态：running、success、no_results、failed 或 clarification。"
+    )
+    answer_mode: str | None = Field(description="回答路径。")
+    intent: dict[str, Any] = Field(description="意图识别结果。")
+    chat_provider: str | None = Field(description="生成模型供应商。")
+    chat_model_name: str | None = Field(description="生成模型名称。")
+    retrieval_mode: str | None = Field(description="检索模式。")
+    top_k: int | None = Field(description="请求的最大结果数。")
+    include_context: bool = Field(description="是否启用上下文扩展。")
+    product_name: str | None = Field(description="产品过滤条件。")
+    model_name: str | None = Field(description="型号过滤条件。")
+    retrieval_attempts: list[dict[str, Any]] = Field(description="每次检索尝试的摘要。")
+    result_count: int = Field(description="累计召回条数。")
+    source_count: int = Field(description="累计保存的召回快照数。")
+    top_rerank_score: float | None = Field(description="最高重排分；未启用重排时为空。")
+    retrieval_duration_ms: int | None = Field(description="累计检索耗时，单位毫秒。")
+    generation_duration_ms: int | None = Field(description="生成耗时，单位毫秒。")
+    total_duration_ms: int | None = Field(description="项目侧总耗时，单位毫秒。")
+    prompt_tokens: int | None = Field(description="输入 token 数。")
+    completion_tokens: int | None = Field(description="输出 token 数。")
+    total_tokens: int | None = Field(description="总 token 数。")
+    error_code: str | None = Field(description="失败错误代码。")
+    error_message: str | None = Field(description="失败错误摘要。")
+    finished_at: datetime | None = Field(description="完成时间；进行中为空。")
+    created_at: datetime = Field(description="创建时间。")
+    updated_at: datetime = Field(description="最后更新时间。")
+    answer_preview: str | None = Field(
+        default=None, description="答案摘要，最多 280 个字符；完整答案见详情。"
+    )
+
+
+class ProjectTraceAdminRead(ProjectTraceRead):
+    """管理员视图的项目轨迹摘要；附带项目、公司与知识库名称。"""
+
+    project_key: str = Field(description="项目标识。")
+    project_name: str = Field(description="项目展示名称。")
+    company_name: str | None = Field(description="公司名称。")
+    knowledge_base_name: str = Field(description="知识库名称。")
+
+
+class ProjectTraceSourceRead(BaseModel):
+    """项目轨迹中的一次召回片段快照。"""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID = Field(description="快照 ID。")
+    attempt_index: int = Field(description="同一次项目请求内的检索序号，从 0 开始。")
+    rank: int = Field(description="该次检索中的排序。")
+    document_id: UUID | None = Field(description="原文档 ID；文档删除后可能为空。")
+    document_version_id: UUID | None = Field(description="文档版本 ID。")
+    chunk_id: UUID | None = Field(description="命中父块 ID。")
+    filename: str = Field(description="文件名快照。")
+    version_number: int = Field(description="文档版本号。")
+    page_number: int | None = Field(description="页码。")
+    section: str | None = Field(description="章节。")
+    content_snapshot: str = Field(description="检索返回的父块正文快照。")
+    context_snapshot: str | None = Field(description="上下文快照。")
+    cosine_distance: float | None = Field(description="Chroma 距离。")
+    bm25_score: float | None = Field(description="BM25 分数。")
+    rrf_score: float | None = Field(description="RRF 融合分数。")
+    rerank_score: float | None = Field(description="Rerank 分数。")
+    asset_ids: list[str] = Field(description="快照中的图片资产 ID。")
+    created_at: datetime = Field(description="记录时间。")
+
+
+class ProjectTraceDetail(ProjectTraceAdminRead):
+    """项目轨迹详情：完整答案、检索尝试与召回片段快照。"""
+
+    answer: str | None = Field(description="项目最终回答。")
+    sources: list[ProjectTraceSourceRead] = Field(description="召回片段快照。")
+
+
+class ProjectTraceAdminListResponse(BaseModel):
+    """管理员分页查询的项目轨迹。"""
+
+    page: int = Field(description="当前页码。")
+    page_size: int = Field(description="每页记录数。")
+    total: int = Field(description="符合条件的记录总数。")
+    items: list[ProjectTraceAdminRead] = Field(description="轨迹摘要。")
+
+
 class AdminDailyTrendRead(BaseModel):
     """统计仪表盘的单日问答趋势点。"""
 
@@ -531,6 +734,26 @@ class ModelProviderPreset(BaseModel):
     known_models: list[str] = Field(
         default_factory=list, description="该厂商常见模型名，供界面提示。"
     )
+    supports_rerank: bool = Field(default=False, description="是否提供 Rerank 能力。")
+    rerank_path: str | None = Field(default=None, description="默认 Rerank 路径。")
+    rerank_base_url: str | None = Field(
+        default=None, description="Rerank 独立基址；为空时沿用 base_url。"
+    )
+    known_rerank_models: list[str] = Field(
+        default_factory=list, description="该厂商常见 Rerank 模型名。"
+    )
+    supports_ocr: bool = Field(default=False, description="是否提供 OCR 视觉识别能力。")
+    ocr_path: str | None = Field(default=None, description="OCR 视觉接口默认路径。")
+    ocr_base_url: str | None = Field(
+        default=None, description="OCR 独立基址；为空时沿用 base_url。"
+    )
+    ocr_mode: Literal["auto", "vision", "paddleocr", "baidu_async"] | None = Field(
+        default=None,
+        description="OCR 调用模式：自动判断、视觉对话、PaddleOCR 同步接口或百度异步任务。",
+    )
+    known_ocr_models: list[str] = Field(
+        default_factory=list, description="该厂商常见 OCR 模型名。"
+    )
 
 
 class ModelProfileWrite(ModelProfileSpec):
@@ -558,7 +781,7 @@ class ModelProfileRead(BaseModel):
 
     id: UUID = Field(description="模型档案 ID。")
     name: str = Field(description="档案名称。")
-    kind: str = Field(description="模型类型：embedding、rerank 或 chat。")
+    kind: str = Field(description="模型类型：embedding、rerank、chat 或 ocr。")
     provider: str = Field(description="模型供应商。")
     model_name: str = Field(description="供应商模型名或 Endpoint ID。")
     dimensions: int | None = Field(description="Embedding 向量维度；其他类型为空。")
@@ -591,11 +814,45 @@ class ModelProfileTestRead(BaseModel):
     """模型档案连通性测试结果；失败也返回 200，便于管理页直接展示原因。"""
 
     ok: bool = Field(description="是否连通成功。")
-    kind: Literal["embedding", "rerank", "chat"] = Field(description="被测模型类型。")
+    kind: Literal["embedding", "rerank", "chat", "ocr"] = Field(description="被测模型类型。")
     latency_ms: int = Field(description="本次调用耗时（毫秒）。")
     message: str = Field(description="成功摘要或失败原因，不含密钥。")
     error_code: str | None = Field(
         default=None, description="失败时的错误码，例如 EMBEDDING_PROVIDER_HTTP_401。"
+    )
+
+
+class ModelUsageItemRead(BaseModel):
+    """某一调用位置上实际生效的模型；环境模型没有档案 ID。"""
+
+    profile_id: UUID | None = Field(default=None, description="模型档案 ID；环境模型为空。")
+    name: str = Field(description="档案名称或环境模型名称。")
+    provider: str = Field(description="模型供应商。")
+    model_name: str = Field(description="供应商模型名或 Endpoint ID。")
+    source: Literal["knowledge_base", "default", "environment"] = Field(
+        description="来源：知识库绑定、默认档案或环境配置。"
+    )
+    scope_names: list[str] = Field(
+        default_factory=list,
+        description="使用该模型的知识库（公司 / 知识库）；默认与环境模型为空。",
+    )
+    is_default: bool = Field(default=False, description="该档案是否为同类默认模型。")
+    is_active: bool = Field(default=True, description="当前调用是否实际使用该模型。")
+    is_enabled: bool = Field(default=True, description="档案是否启用；环境模型恒为 True。")
+
+
+class ModelUsageSlotRead(BaseModel):
+    """按调用位置聚合的模型列表；knowledge_base 与 default 来源可同时存在。"""
+
+    key: Literal["embedding", "rerank", "chat", "ocr"] = Field(description="调用位置键。")
+    items: list[ModelUsageItemRead] = Field(description="该位置使用的模型。")
+
+
+class ModelUsageRead(BaseModel):
+    """知识库内部全部模型调用位置总览。"""
+
+    slots: list[ModelUsageSlotRead] = Field(
+        description="按向量化、重排、生成、OCR 顺序排列。"
     )
 
 

@@ -43,6 +43,7 @@ const menuGroups = [
     items: [
       { path: '/qa', label: '问答测试', icon: 'ChatDotRound' },
       { path: '/qa-records', label: '问答记录', icon: 'Tickets' },
+      { path: '/project-traces', label: '项目记录', icon: 'DataLine' },
       { path: '/faqs', label: 'FAQ 管理', icon: 'ChatLineSquare' },
     ],
   },

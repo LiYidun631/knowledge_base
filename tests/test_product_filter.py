@@ -3,7 +3,7 @@
 import asyncio
 from contextlib import asynccontextmanager
 from hashlib import sha256
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
@@ -490,7 +490,7 @@ def test_http_product_catalog_crud_batch_delete_and_upload_validation(
                     CompanyCredential(
                         company_id=company_id,
                         name="默认凭据",
-                        token_hash=sha256("owner-company-token".encode()).hexdigest(),
+                        token_hash=sha256(b"owner-company-token").hexdigest(),
                     )
                 )
                 await session.commit()
@@ -645,7 +645,7 @@ def test_http_product_catalog_update_renames_and_cascades(monkeypatch, tmp_path)
                     CompanyCredential(
                         company_id=company_id,
                         name="默认凭据",
-                        token_hash=sha256("owner-company-token".encode()).hexdigest(),
+                        token_hash=sha256(b"owner-company-token").hexdigest(),
                     )
                 )
                 await session.commit()

@@ -16,12 +16,12 @@ _MIGRATION = importlib.import_module("migrations.versions.0020_product_catalog_g
 def _build_old_schema(engine: sa.Engine) -> sa.MetaData:
     """按 0019 的旧结构手工建表：目录归属知识库，跨库重复允许。"""
     metadata = sa.MetaData()
-    kbs = sa.Table(
+    sa.Table(
         "knowledge_bases",
         metadata,
         sa.Column("id", sa.Uuid(), primary_key=True),
     )
-    catalog = sa.Table(
+    sa.Table(
         "product_catalog",
         metadata,
         sa.Column("id", sa.Uuid(), primary_key=True),
@@ -104,7 +104,10 @@ def test_0020_globalizes_catalog_and_dedupes() -> None:
         with Operations.context(MigrationContext.configure(connection)):
             _MIGRATION.upgrade()
 
-        columns = {column["name"] for column in sa.inspect(connection).get_columns("product_catalog")}
+        columns = {
+            column["name"]
+            for column in sa.inspect(connection).get_columns("product_catalog")
+        }
         assert "knowledge_base_id" not in columns
 
         # 跨库重复条目已去重，仅剩两条全局条目。
@@ -144,7 +147,10 @@ def test_0020_globalizes_catalog_and_dedupes() -> None:
     with engine.begin() as connection:
         with Operations.context(MigrationContext.configure(connection)):
             _MIGRATION.downgrade()
-        columns = {column["name"] for column in sa.inspect(connection).get_columns("product_catalog")}
+        columns = {
+            column["name"]
+            for column in sa.inspect(connection).get_columns("product_catalog")
+        }
         assert "knowledge_base_id" in columns
 
 

@@ -411,7 +411,8 @@ def test_generate_answer_stream_yields_delta_chunks(monkeypatch) -> None:
         'data: {"choices":[{"delta":{"content":"第一步"}}]}\n\n'
         'data: {"choices":[{"delta":{}}]}\n\n'
         'data: {"choices":[{"delta":{"content":"第二步"}}]}\n\n'
-        'data: {"choices":[],"usage":{"prompt_tokens":80,"completion_tokens":12,"total_tokens":92}}\n\n'
+        'data: {"choices":[],"usage":{"prompt_tokens":80,"completion_tokens":12,'
+        '"total_tokens":92}}\n\n'
         "data: [DONE]\n\n"
     ).encode()
 

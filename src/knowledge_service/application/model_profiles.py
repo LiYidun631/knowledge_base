@@ -20,6 +20,7 @@ from knowledge_service.infrastructure.persistence.models import (
 )
 
 # 厂商预设写死在代码中，界面按服务商下拉选择后补填模型名与密钥。
+# 每项同时声明该厂商支持的调用能力与默认路径，前端不再硬编码任何厂商参数。
 VENDOR_PRESETS: list[dict[str, Any]] = [
     {
         "key": "openai_compatible",
@@ -30,8 +31,17 @@ VENDOR_PRESETS: list[dict[str, Any]] = [
         "chat_path": "/chat/completions",
         "known_chat_models": ["gpt-4o-mini", "gpt-4o"],
         "supports_embedding": True,
-        "note": "适用于 OpenAI 及任何兼容 /v1 的服务商",
+        "note": "适用于 OpenAI 及任何兼容 /v1 的服务商；OCR 使用视觉对话接口",
         "known_models": ["text-embedding-3-small", "text-embedding-3-large"],
+        "supports_rerank": False,
+        "rerank_path": None,
+        "rerank_base_url": None,
+        "known_rerank_models": [],
+        "supports_ocr": True,
+        "ocr_path": "/chat/completions",
+        "ocr_base_url": None,
+        "ocr_mode": "vision",
+        "known_ocr_models": ["gpt-4o-mini", "gpt-4o"],
     },
     {
         "key": "dashscope",
@@ -42,8 +52,17 @@ VENDOR_PRESETS: list[dict[str, Any]] = [
         "chat_path": "/chat/completions",
         "known_chat_models": ["qwen-flash", "qwen-plus", "qwen-max"],
         "supports_embedding": True,
-        "note": "支持 embedding-v4、qwen3 系列与 text-rerank",
+        "note": "支持 embedding-v4、qwen3 系列、text-rerank 与 qwen-vl OCR",
         "known_models": ["text-embedding-v4", "qwen3.7-text-rerank"],
+        "supports_rerank": True,
+        "rerank_path": "/reranks",
+        "rerank_base_url": "https://dashscope.aliyuncs.com/compatible-api/v1",
+        "known_rerank_models": ["qwen3.7-text-rerank", "qwen3-rerank"],
+        "supports_ocr": True,
+        "ocr_path": "/chat/completions",
+        "ocr_base_url": None,
+        "ocr_mode": "vision",
+        "known_ocr_models": ["qwen-vl-ocr", "qwen-vl-plus", "qwen3-vl-plus"],
     },
     {
         "key": "bigmodel",
@@ -54,8 +73,17 @@ VENDOR_PRESETS: list[dict[str, Any]] = [
         "chat_path": "/chat/completions",
         "known_chat_models": ["glm-4-flash", "glm-4-plus"],
         "supports_embedding": True,
-        "note": "支持 embedding-3",
+        "note": "支持 embedding-3 与 GLM 视觉模型",
         "known_models": ["embedding-3"],
+        "supports_rerank": False,
+        "rerank_path": None,
+        "rerank_base_url": None,
+        "known_rerank_models": [],
+        "supports_ocr": True,
+        "ocr_path": "/chat/completions",
+        "ocr_base_url": None,
+        "ocr_mode": "vision",
+        "known_ocr_models": ["glm-4v-flash", "glm-4v-plus"],
     },
     {
         "key": "volcengine",
@@ -68,6 +96,15 @@ VENDOR_PRESETS: list[dict[str, Any]] = [
         "supports_embedding": True,
         "note": "需填写已部署模型的 Endpoint ID，每次只处理一段文本",
         "known_models": [],
+        "supports_rerank": False,
+        "rerank_path": None,
+        "rerank_base_url": None,
+        "known_rerank_models": [],
+        "supports_ocr": True,
+        "ocr_path": "/chat/completions",
+        "ocr_base_url": None,
+        "ocr_mode": "vision",
+        "known_ocr_models": [],
     },
     {
         "key": "qianfan",
@@ -78,8 +115,38 @@ VENDOR_PRESETS: list[dict[str, Any]] = [
         "chat_path": "/chat/completions",
         "known_chat_models": ["ernie-4.0-8k"],
         "supports_embedding": True,
-        "note": "支持 Embedding-V1",
+        "note": "支持 Embedding-V1；OCR 可选 PaddleOCR-VL 专用接口、视觉对话或百度官方异步接口",
         "known_models": ["Embedding-V1"],
+        "supports_rerank": False,
+        "rerank_path": None,
+        "rerank_base_url": None,
+        "known_rerank_models": [],
+        "supports_ocr": True,
+        "ocr_path": "/chat/completions",
+        "ocr_base_url": None,
+        "ocr_mode": "auto",
+        "known_ocr_models": ["paddleocr-vl-0.9b", "ernie-4.5-turbo-vl"],
+    },
+    {
+        "key": "baidu",
+        "display_name": "百度智能云 OCR（异步）",
+        "base_url": "https://aip.baidubce.com",
+        "embedding_path": "",
+        "supports_chat": False,
+        "chat_path": None,
+        "known_chat_models": [],
+        "supports_embedding": False,
+        "note": "PaddleOCR-VL 官方异步任务接口；API Key 填 AK:SK，适合长文档与跨页表格",
+        "known_models": [],
+        "supports_rerank": False,
+        "rerank_path": None,
+        "rerank_base_url": None,
+        "known_rerank_models": [],
+        "supports_ocr": True,
+        "ocr_path": None,
+        "ocr_base_url": None,
+        "ocr_mode": "baidu_async",
+        "known_ocr_models": ["PaddleOCR-VL"],
     },
     {
         "key": "deepseek",
@@ -90,19 +157,30 @@ VENDOR_PRESETS: list[dict[str, Any]] = [
         "chat_path": "/chat/completions",
         "known_chat_models": ["deepseek-chat"],
         "supports_embedding": False,
-        "note": "暂不提供 Embedding，仅作对话预留",
+        "note": "暂不提供 Embedding 与 OCR，仅作对话",
         "known_models": [],
+        "supports_rerank": False,
+        "rerank_path": None,
+        "rerank_base_url": None,
+        "known_rerank_models": [],
+        "supports_ocr": False,
+        "ocr_path": None,
+        "ocr_base_url": None,
+        "ocr_mode": None,
+        "known_ocr_models": [],
     },
 ]
 
 EMBEDDING_PROVIDERS = {"openai_compatible", "dashscope", "bigmodel", "volcengine", "qianfan"}
+OCR_PROVIDERS = {"openai_compatible", "dashscope", "bigmodel", "volcengine", "qianfan", "baidu"}
+OCR_MODES = {"auto", "vision", "paddleocr", "baidu_async"}
 
 
 class ModelProfileSpec(BaseModel):
     """创建与修改模型档案的公共字段和校验规则。"""
 
     name: str = Field(min_length=1, max_length=120)
-    kind: Literal["embedding", "rerank", "chat"]
+    kind: Literal["embedding", "rerank", "chat", "ocr"]
     provider: str = Field(min_length=1, max_length=80)
     model_name: str = Field(min_length=1, max_length=200)
     dimensions: int | None = None
@@ -138,6 +216,18 @@ class ModelProfileSpec(BaseModel):
                 raise ValueError("chat_path 必须以 / 开头")
             if self.model_name.startswith("YOUR_"):
                 raise ValueError("请填写平台实际的生成模型名")
+        elif self.kind == "ocr":
+            if self.dimensions is not None:
+                raise ValueError("OCR 模型档案不需要填写向量维度")
+            if self.provider not in OCR_PROVIDERS:
+                raise ValueError("当前 OCR 适配器不支持该模型供应商")
+            TypeAdapter(AnyHttpUrl).validate_python(self.settings.get("base_url"))
+            if not str(self.settings.get("chat_path", "/chat/completions")).startswith("/"):
+                raise ValueError("OCR 视觉接口路径必须以 / 开头")
+            if str(self.settings.get("ocr_mode", "auto")) not in OCR_MODES:
+                raise ValueError("OCR 模式仅支持 auto、vision、paddleocr 或 baidu_async")
+            if self.model_name.startswith("YOUR_"):
+                raise ValueError("请填写平台实际的 OCR 模型名")
         else:
             TypeAdapter(AnyHttpUrl).validate_python(self.settings.get("base_url"))
             if not str(self.settings.get("rerank_path", "/reranks")).startswith("/"):
@@ -146,7 +236,7 @@ class ModelProfileSpec(BaseModel):
 
 
 async def list_model_profiles(
-    session: AsyncSession, *, kind: Literal["embedding", "rerank", "chat"] | None = None
+    session: AsyncSession, *, kind: Literal["embedding", "rerank", "chat", "ocr"] | None = None
 ) -> list[ModelProfile]:
     """列出模型档案；界面按类型分组展示。"""
     statement = select(ModelProfile).order_by(
@@ -155,6 +245,19 @@ async def list_model_profiles(
     if kind is not None:
         statement = statement.where(ModelProfile.kind == kind)
     return list(await session.scalars(statement))
+
+
+async def get_default_model_profile(
+    session: AsyncSession, *, kind: Literal["embedding", "rerank", "chat", "ocr"]
+) -> ModelProfile | None:
+    """返回某一类的启用默认档案；问答、OCR 等全局调用按此解析。"""
+    return await session.scalar(
+        select(ModelProfile).where(
+            ModelProfile.kind == kind,
+            ModelProfile.is_enabled.is_(True),
+            ModelProfile.is_default.is_(True),
+        )
+    )
 
 
 async def get_model_profile(session: AsyncSession, *, model_profile_id: UUID) -> ModelProfile:

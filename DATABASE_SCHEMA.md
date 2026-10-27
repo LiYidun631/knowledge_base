@@ -1,6 +1,6 @@
 # 数据库表结构设计
 
-本文描述知识库作为 `test_agent` 内置模块后的 MySQL 元数据。数据库保存业务事实与任务状态，向量本体写入 Chroma 本地持久目录，入库所需的服务端临时副本默认存入本地目录；部署服务器时也可切换到 RustFS/S3。迁移 `0008_schema_comments_complete` 会为所有已知业务表写入中文表注释，便于在 DataGrip 等工具中识别。
+本文描述知识库作为 `test_agent` 内置模块后的 MySQL 元数据。数据库保存业务事实与任务状态，向量本体写入 Chroma 本地持久目录，入库所需的服务端临时副本默认存入本地目录；部署服务器时也可切换到阿里云 OSS。迁移 `0008_schema_comments_complete` 会为所有已知业务表写入中文表注释，便于在 DataGrip 等工具中识别。
 
 ## 核心表
 
@@ -118,7 +118,7 @@ companies ──< documents（冗余 company_id，用于隔离校验）
 outbox_events ──由 test_agent 应用进程内消费
 
 Chroma：按模型档案分 collection，保存子块向量和 metadata
-本地文件目录：按版本 object_key 保存服务端临时副本和 assets/ 下的图片（服务器可选 RustFS/S3）
+本地文件目录：按版本 object_key 保存服务端临时副本和 assets/ 下的图片（服务器可选阿里云 OSS）
 
 历史关系（保留）：projects、api_credentials、vector_store_profiles
 ```

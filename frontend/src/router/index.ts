@@ -52,6 +52,12 @@ const router = createRouter({
       meta: { group: '问答运营', title: '问答记录' },
     },
     {
+      path: '/project-traces',
+      name: 'project-traces',
+      component: () => import('../views/ProjectTracesView.vue'),
+      meta: { group: '问答运营', title: '项目记录' },
+    },
+    {
       path: '/faqs',
       name: 'faqs',
       component: () => import('../views/FaqsView.vue'),

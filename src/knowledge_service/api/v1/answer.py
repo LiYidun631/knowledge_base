@@ -818,7 +818,10 @@ async def _stream_qa_events(
     "/knowledge-bases/{knowledge_base_id}/ask/stream",
     response_class=StreamingResponse,
     summary="流式检索并生成知识库答案",
-    description="与 /ask 相同的检索与生成流程，答案经 SSE 边生成边下发：meta、delta、done，失败时下发 error。",
+    description=(
+        "与 /ask 相同的检索与生成流程，答案经 SSE 边生成边下发："
+        "meta、delta、done，失败时下发 error。"
+    ),
 )
 async def ask_knowledge_base_stream(
     knowledge_base_id: Annotated[UUID, Path(description="待问答的知识库 ID。")],

@@ -10,12 +10,14 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from knowledge_service.application.documents import ingestion
 from knowledge_service.application.documents.chunking import Chunk
+from knowledge_service.application.documents.parsing import ParsedBlock
 from knowledge_service.application.documents.service import register_document
 from knowledge_service.application.knowledge_bases.service import (
     create_knowledge_base,
     update_knowledge_base,
 )
 from knowledge_service.core.config import Settings
+from knowledge_service.core.ocr_runtime import get_ocr_runtime
 from knowledge_service.domain.errors import ModelConfigurationLocked
 from knowledge_service.infrastructure.chroma.vector_store import ChromaWriteError
 from knowledge_service.infrastructure.object_storage.local import LocalObjectStorage
@@ -298,6 +300,91 @@ def test_reupload_only_switches_current_version_after_success(
                 )
                 assert (second_chunk_count == 0) if fail_new_version else (second_chunk_count > 0)
                 assert writes[0]["document_version_id"] != writes[1]["document_version_id"]
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_ingestion_injects_default_ocr_profile_into_parser(tmp_path, monkeypatch) -> None:
+    """默认 OCR 档案应随入库解析传入线程，任务结束后恢复上下文。"""
+    settings = Settings(storage_root=tmp_path / "objects", object_storage_backend="local")
+    monkeypatch.setattr(ingestion, "get_settings", lambda: settings)
+
+    async def embed(profile, texts):
+        return [[0.8, 0.2] for _ in texts]
+
+    monkeypatch.setattr(ingestion, "embed_texts", embed)
+    monkeypatch.setattr(ingestion, "upsert_chunks", lambda **kwargs: None)
+    seen = []
+
+    def fake_parse(filename, content):
+        seen.append(get_ocr_runtime())
+        return [ParsedBlock(kind="text", content="默认 OCR 档案已注入解析器。")]
+
+    monkeypatch.setattr(ingestion, "parse_document", fake_parse)
+
+    async def scenario():
+        engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'ocr-profile.db'}")
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            async with engine.begin() as connection:
+                await connection.run_sync(Base.metadata.create_all)
+            async with factory() as session, session.begin():
+                embedding = ModelProfile(
+                    name="test-embedding",
+                    kind="embedding",
+                    provider="openai_compatible",
+                    model_name="test-embedding-model",
+                    dimensions=2,
+                    is_default=True,
+                    settings={"base_url": "https://example.test/v1"},
+                )
+                ocr_profile = ModelProfile(
+                    name="默认 OCR",
+                    kind="ocr",
+                    provider="qianfan",
+                    model_name="paddleocr-vl-0.9b",
+                    is_default=True,
+                    settings={
+                        "base_url": "https://qianfan.baidubce.com/v2",
+                        "chat_path": "/chat/completions",
+                        "ocr_mode": "auto",
+                    },
+                )
+                session.add_all([embedding, ocr_profile])
+                await session.flush()
+                kb = await create_knowledge_base(
+                    session,
+                    name="扫描资料",
+                    description=None,
+                    embedding_model_id=None,
+                    rerank_model_id=None,
+                )
+                content = "# 扫描件\n\n扫描件文字。".encode()
+                await LocalObjectStorage(settings.storage_root).put("scan.md", content)
+                document = await register_document(
+                    session,
+                    knowledge_base_id=kb.id,
+                    document_key="scan-guide",
+                    filename="scan.md",
+                    media_type="text/markdown",
+                    size_bytes=len(content),
+                    content_sha256=hashlib.sha256(content).hexdigest(),
+                    object_key="scan.md",
+                )
+                job = await session.scalar(
+                    select(IngestionJob).where(IngestionJob.document_id == document.id)
+                )
+                job_id = job.id
+
+            assert await ingestion.run_ingestion(job_id, factory) == "completed"
+            assert len(seen) == 1
+            assert seen[0] is not None
+            assert seen[0].model_name == "paddleocr-vl-0.9b"
+            assert seen[0].mode == "auto"
+            assert seen[0].profile_name == "默认 OCR"
+            assert get_ocr_runtime() is None
         finally:
             await engine.dispose()
 

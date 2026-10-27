@@ -5,7 +5,7 @@ from knowledge_service.ports.object_store import ObjectStorage
 
 
 def get_object_storage(settings: Settings | None = None) -> ObjectStorage:
-    """按统一配置选择本地目录或 RustFS/S3 适配器。"""
+    """按统一配置选择本地目录或阿里云 OSS 适配器。"""
     settings = settings or get_settings()
     if settings.object_storage_backend == "local":
         return LocalObjectStorage(settings.storage_root)

@@ -36,6 +36,12 @@ from knowledge_service.application.documents.ingestion import (
     discard_ingestion_process_lock,
     ingestion_process_lock,
 )
+from knowledge_service.application.documents.preview import (
+    PreviewConversionFailed,
+    PreviewConverterUnavailable,
+    PreviewFormatUnsupported,
+    build_preview,
+)
 from knowledge_service.application.documents.rendering import render_images
 from knowledge_service.application.documents.upload import (
     SourceDownloadError,
@@ -898,7 +904,7 @@ async def get_document_asset(
     asset_id: Annotated[UUID, ApiPath(description="图片资产 ID。")],
     session: Annotated[AsyncSession, Depends(get_db_session, scope="function")],
 ) -> Response:
-    """从本地目录或 RustFS 读取图片，不暴露对象存储密钥。"""
+    """从本地目录或 OSS 读取图片，不暴露对象存储密钥。"""
     asset = await session.get(DocumentAsset, asset_id)
     if asset is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="图片资产不存在")
@@ -1422,6 +1428,67 @@ async def get_document_file(
         media_type=version.media_type or "application/octet-stream",
         headers={
             "Content-Disposition": content_disposition,
+            "Cache-Control": "no-store",
+        },
+    )
+
+
+@router.get(
+    "/documents/{document_id}/preview",
+    summary="将文档最新版本转换为浏览器可预览内容",
+    description=(
+        "Office、旧版 Office、RTF、ODF 和 TIFF 由服务端转换为 PDF 或 PNG；"
+        "缺少 LibreOffice 时返回 503，前端仍可下载原文件。"
+    ),
+)
+async def get_document_preview(
+    document_id: Annotated[UUID, ApiPath(description="逻辑文档 ID。")],
+    session: Annotated[AsyncSession, Depends(get_db_session, scope="function")],
+) -> Response:
+    document = await session.scalar(
+        select(Document).where(Document.id == document_id)
+    )
+    if document is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+    version = await session.scalar(
+        select(DocumentVersion).where(
+            DocumentVersion.document_id == document_id,
+            DocumentVersion.version_number == document.latest_version_number,
+        )
+    )
+    if version is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="最新版本的原文件不存在"
+        )
+    try:
+        content = await get_object_storage(get_settings()).get(version.object_key)
+    except Exception as exc:
+        logger.exception("Failed to read document file: document_id=%s", document_id)
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="原文件读取失败"
+        ) from exc
+    try:
+        preview = await asyncio.to_thread(
+            build_preview, version.id, version.filename, content
+        )
+    except PreviewConverterUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
+    except PreviewConversionFailed as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
+        ) from exc
+    except PreviewFormatUnsupported as exc:
+        raise HTTPException(
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail=str(exc)
+        ) from exc
+    suffix = ".png" if preview.media_type == "image/png" else ".pdf"
+    return Response(
+        content=preview.content,
+        media_type=preview.media_type,
+        headers={
+            "Content-Disposition": f'inline; filename="preview{suffix}"',
             "Cache-Control": "no-store",
         },
     )

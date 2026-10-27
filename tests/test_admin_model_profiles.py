@@ -12,6 +12,7 @@ from knowledge_service.core.config import Settings, get_settings
 from knowledge_service.core.credentials import resolve_profile_api_key
 from knowledge_service.infrastructure.model_providers.chat import ChatProviderError
 from knowledge_service.infrastructure.model_providers.embeddings import EmbeddingProviderError
+from knowledge_service.infrastructure.ocr_client import LayoutResult, OcrServiceError
 from knowledge_service.infrastructure.persistence.base import Base
 from knowledge_service.infrastructure.persistence.models import (
     Company,
@@ -321,6 +322,62 @@ def test_admin_chat_model_profile_crud_and_validation(monkeypatch, tmp_path):
     asyncio.run(scenario())
 
 
+def test_admin_ocr_model_profile_crud_and_validation(monkeypatch, tmp_path):
+    async def scenario():
+        async with _admin_service(monkeypatch, tmp_path) as (client, _factory):
+            payload = {
+                "name": "扫描件 OCR",
+                "kind": "ocr",
+                "provider": "qianfan",
+                "model_name": "paddleocr-vl-0.9b",
+                "settings": {
+                    "base_url": "https://qianfan.baidubce.com/v2",
+                    "chat_path": "/chat/completions",
+                    "ocr_mode": "auto",
+                },
+            }
+            response = await client.post("admin/model-profiles", json=payload)
+            assert response.status_code == 201, response.text
+            created = response.json()
+            assert created["kind"] == "ocr"
+            assert created["dimensions"] is None
+
+            response = await client.get("admin/model-profiles", params={"kind": "ocr"})
+            assert response.status_code == 200
+            assert [item["name"] for item in response.json()] == ["扫描件 OCR"]
+
+            # OCR 档案不允许写维度、供应商必须在 OCR 适配器白名单内、模式取值受限。
+            for override in (
+                {"dimensions": 1536},
+                {"provider": "deepseek"},
+                {"settings": {**payload["settings"], "ocr_mode": "layout"}},
+                {"settings": {"base_url": "not-a-url"}},
+                {"settings": {**payload["settings"], "chat_path": "chat/completions"}},
+                {"model_name": "YOUR_OCR_MODEL"},
+            ):
+                response = await client.post(
+                    "admin/model-profiles", json={**payload, "name": "坏配置", **override}
+                )
+                assert response.status_code == 422, (override, response.text)
+
+            # OCR 也支持设为全局默认档案，供入库解析使用。
+            response = await client.post(f"admin/model-profiles/{created['id']}/default")
+            assert response.status_code == 200
+            assert response.json()["is_default"] is True
+
+            response = await client.get("admin/model-usage")
+            assert response.status_code == 200
+            ocr_slot = {slot["key"]: slot for slot in response.json()["slots"]}["ocr"]
+            assert [
+                (item["name"], item["source"], item["is_active"]) for item in ocr_slot["items"]
+            ] == [
+                ("扫描件 OCR", "default", True),
+                ("环境 OCR 模型", "environment", False),
+            ]
+
+    asyncio.run(scenario())
+
+
 def test_admin_model_api_key_is_write_only(monkeypatch, tmp_path):
     async def scenario():
         async with _admin_service(monkeypatch, tmp_path) as (client, factory):
@@ -480,6 +537,46 @@ def test_admin_model_profile_connectivity_test(monkeypatch, tmp_path):
             assert payload["kind"] == "chat"
             assert payload["message"] == "Chat 调用成功，模型回复：正常"
 
+            # OCR 用生成的测试图调用视觉模型，成功时回显识别文字。
+            response = await client.post(
+                "admin/model-profiles",
+                json={
+                    "name": "连通性测试-ocr",
+                    "kind": "ocr",
+                    "provider": "qianfan",
+                    "model_name": "paddleocr-vl-0.9b",
+                    "settings": {
+                        "base_url": "https://qianfan.baidubce.com/v2",
+                        "chat_path": "/chat/completions",
+                        "ocr_mode": "auto",
+                    },
+                },
+            )
+            assert response.status_code == 201, response.text
+            ocr_id = response.json()["id"]
+            monkeypatch.setattr(
+                "knowledge_service.api.v1.admin.analyze_image",
+                lambda *args, **kwargs: LayoutResult((), "OCR TEST 123"),
+            )
+            response = await client.post(f"admin/model-profiles/{ocr_id}/test")
+            assert response.status_code == 200
+            payload = response.json()
+            assert payload["ok"] is True
+            assert payload["kind"] == "ocr"
+            assert "OCR TEST 123" in payload["message"]
+
+            monkeypatch.setattr(
+                "knowledge_service.api.v1.admin.analyze_image",
+                lambda *args, **kwargs: (_ for _ in ()).throw(
+                    OcrServiceError("OCR_TIMEOUT: 视觉 OCR 请求超时")
+                ),
+            )
+            response = await client.post(f"admin/model-profiles/{ocr_id}/test")
+            assert response.status_code == 200
+            payload = response.json()
+            assert payload["ok"] is False
+            assert payload["error_code"] == "OCR_TIMEOUT"
+
             # 停用档案也允许测试，便于启用前先验证密钥和地址。
             await client.patch(f"admin/model-profiles/{chat_id}", json={"is_enabled": False})
             response = await client.post(f"admin/model-profiles/{chat_id}/test")
@@ -521,6 +618,84 @@ def test_admin_model_profile_connectivity_test(monkeypatch, tmp_path):
     asyncio.run(scenario())
 
 
+def test_admin_model_usage_lists_internal_models_and_scopes(monkeypatch, tmp_path):
+    async def scenario():
+        async with _admin_service(monkeypatch, tmp_path) as (client, factory):
+            response = await client.get("admin/model-usage")
+            assert response.status_code == 200, response.text
+            slots = {slot["key"]: slot for slot in response.json()["slots"]}
+            assert list(slots) == ["embedding", "rerank", "chat", "ocr"]
+
+            embedding = slots["embedding"]["items"]
+            assert [(item["name"], item["source"], item["scope_names"]) for item in embedding] == [
+                ("已绑定-embedding", "knowledge_base", ["管理测试公司 / 占位子库"])
+            ]
+            # 未绑定且未设默认的 Rerank 档案不算在用。
+            async with factory() as session:
+                rerank_id = await session.scalar(
+                    select(ModelProfile.id).where(ModelProfile.name == "备用-rerank")
+                )
+            assert slots["rerank"]["items"] == []
+
+            # 设为默认后，新建知识库会沿用它，总览应显示为默认来源。
+            response = await client.post(f"admin/model-profiles/{rerank_id}/default")
+            assert response.status_code == 200
+            response = await client.get("admin/model-usage")
+            rerank = {slot["key"]: slot for slot in response.json()["slots"]}["rerank"]["items"]
+            assert [(item["name"], item["source"], item["scope_names"]) for item in rerank] == [
+                ("备用-rerank", "default", [])
+            ]
+
+            chat = slots["chat"]["items"]
+            assert [item["source"] for item in chat] == ["environment"]
+            assert chat[0]["model_name"] == "qwen-plus"
+            assert chat[0]["is_active"] is True
+
+            ocr = slots["ocr"]["items"][0]
+            assert ocr["model_name"] == "qwen-vl-plus"
+            assert ocr["provider"] == "dashscope"
+            assert ocr["is_active"] is True
+
+            # 绑定 Rerank 并设置默认 Chat 后，总览应同步反映实际调用模型。
+            async with factory() as session:
+                kb = await session.scalar(select(KnowledgeBase))
+                kb.rerank_model_id = rerank_id
+                await session.commit()
+
+            response = await client.post(
+                "admin/model-profiles",
+                json={
+                    "name": "默认生成模型",
+                    "kind": "chat",
+                    "provider": "dashscope",
+                    "model_name": "qwen-flash",
+                    "settings": {
+                        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+                        "chat_path": "/chat/completions",
+                    },
+                },
+            )
+            assert response.status_code == 201, response.text
+            chat_id = response.json()["id"]
+            response = await client.post(f"admin/model-profiles/{chat_id}/default")
+            assert response.status_code == 200
+
+            response = await client.get("admin/model-usage")
+            assert response.status_code == 200
+            slots = {slot["key"]: slot for slot in response.json()["slots"]}
+            rerank = slots["rerank"]["items"]
+            assert [(item["name"], item["source"], item["scope_names"]) for item in rerank] == [
+                ("备用-rerank", "knowledge_base", ["管理测试公司 / 占位子库"])
+            ]
+            chat = slots["chat"]["items"]
+            assert [(item["name"], item["source"], item["is_active"]) for item in chat] == [
+                ("默认生成模型", "default", True),
+                ("环境兜底模型", "environment", False),
+            ]
+
+    asyncio.run(scenario())
+
+
 def test_admin_model_presets_are_code_defined(monkeypatch, tmp_path):
     async def scenario():
         async with _admin_service(monkeypatch, tmp_path) as (client, _factory):
@@ -533,6 +708,7 @@ def test_admin_model_presets_are_code_defined(monkeypatch, tmp_path):
                 "bigmodel",
                 "volcengine",
                 "qianfan",
+                "baidu",
                 "deepseek",
             }
             assert presets["dashscope"]["supports_embedding"] is True
@@ -541,5 +717,17 @@ def test_admin_model_presets_are_code_defined(monkeypatch, tmp_path):
             assert presets["dashscope"]["supports_chat"] is True
             assert presets["dashscope"]["chat_path"] == "/chat/completions"
             assert "qwen-plus" in presets["dashscope"]["known_chat_models"]
+            # 各厂商的重排与 OCR 调用方式内置在预设中，管理页只需填模型名和密钥。
+            assert presets["dashscope"]["supports_rerank"] is True
+            assert presets["dashscope"]["rerank_path"] == "/reranks"
+            assert "qwen3.7-text-rerank" in presets["dashscope"]["known_rerank_models"]
+            assert presets["qianfan"]["supports_ocr"] is True
+            assert presets["qianfan"]["ocr_mode"] == "auto"
+            assert "paddleocr-vl-0.9b" in presets["qianfan"]["known_ocr_models"]
+            assert presets["baidu"]["supports_ocr"] is True
+            assert presets["baidu"]["ocr_mode"] == "baidu_async"
+            assert presets["baidu"]["base_url"] == "https://aip.baidubce.com"
+            assert presets["deepseek"]["supports_ocr"] is False
+            assert presets["deepseek"]["supports_rerank"] is False
 
     asyncio.run(scenario())

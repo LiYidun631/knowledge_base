@@ -26,13 +26,14 @@ class Settings(BaseSettings):
     credential_encryption_key: SecretStr = SecretStr("")
     # 独立开发时可填写此连接；嵌入 test_agent 后留空并自动复用聊天数据库配置。
     database_url: str | None = None
-    # 默认将原始文件存到本地目录；服务器可按需切换到 RustFS/S3。
+    # 默认将原始文件存到本地目录；生产环境切换为 s3 后端时连接阿里云 OSS。
     object_storage_backend: Literal["local", "s3"] = "local"
-    object_storage_endpoint_url: str = "http://localhost:9000"
-    object_storage_access_key: SecretStr = Field(default=SecretStr("knowledge-service"))
-    object_storage_secret_key: SecretStr = Field(default=SecretStr("knowledge-service-secret"))
+    object_storage_endpoint_url: str = ""
+    object_storage_access_key: SecretStr = SecretStr("")
+    object_storage_secret_key: SecretStr = SecretStr("")
     object_storage_bucket: str = "knowledge-files"
-    object_storage_region: str = "us-east-1"
+    # 填地域 ID（如 cn-hangzhou），不是 endpoint 里的 oss-cn-hangzhou。
+    object_storage_region: str = ""
     storage_root: Path = Path("data/knowledge_files")
     # 旧版 DOC/PPT 等二进制 Office 文件通过 LibreOffice 转换后再解析。
     office_converter_path: str = ""
@@ -205,6 +206,24 @@ class Settings(BaseSettings):
     ocr_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     ocr_chat_path: str = "/chat/completions"
     ocr_model_name: str = "qwen-vl-plus"
+    # auto 按模型名判断是否走 PaddleOCR 专用接口；vision 走聊天视觉接口；
+    # paddleocr 强制千帆同步专用接口；baidu_async 走百度智能云官方异步任务接口。
+    ocr_mode: Literal["auto", "vision", "paddleocr", "baidu_async"] = "auto"
+    # 百度官方异步 OCR 使用 AK/SK 换取 access_token，地址与路径固定为 AIP。
+    ocr_async_base_url: str = "https://aip.baidubce.com"
+    ocr_async_task_path: str = "/rest/2.0/brain/online/v2/paddle-vl-parser/task"
+    ocr_async_token_path: str = "/oauth/2.0/token"
+    # 未在档案中写 AK:SK 时，按这两个引用名从环境变量或模型密钥映射读取。
+    ocr_async_ak_ref: str = "BAIDU_OCR_AK"
+    ocr_async_sk_ref: str = "BAIDU_OCR_SK"
+    # 官方建议每 5-10 秒查询一次；整份大文档允许比单次 HTTP 请求更长的等待。
+    ocr_async_poll_interval_seconds: float = Field(default=5, ge=1, le=60)
+    ocr_async_timeout_seconds: float = Field(default=900, gt=0)
+    # 跨页表格合并与标题层级重排默认开启，减少长文档结构错乱。
+    ocr_async_merge_tables: bool = True
+    ocr_async_relevel_titles: bool = True
+    ocr_async_analysis_chart: bool = False
+    ocr_async_recognize_seal: bool = False
     ocr_timeout_seconds: float = Field(default=180, gt=0)
     ocr_render_dpi: int = Field(default=160, ge=72, le=300)
     # PDF 扫描页使用小批量并发，避免逐页等待且降低视觉服务限流风险。
@@ -278,6 +297,45 @@ class Settings(BaseSettings):
             raise ValueError("父块长度不能小于子块长度")
         if self.search_vector_weight + self.search_bm25_weight <= 0:
             raise ValueError("向量检索和 BM25 检索权重不能同时为 0")
+        return self
+
+    @model_validator(mode="after")
+    def validate_object_storage(self) -> "Settings":
+        """s3 后端在启动时校验 OSS 参数，避免首次上传才暴露缺配置。"""
+        if self.object_storage_backend != "s3":
+            return self
+        endpoint = self.object_storage_endpoint_url.strip()
+        bucket = self.object_storage_bucket.strip()
+        region = self.object_storage_region.strip()
+        missing = [
+            env
+            for env, value in (
+                ("KNOWLEDGE_SERVICE_OBJECT_STORAGE_ENDPOINT_URL", endpoint),
+                (
+                    "KNOWLEDGE_SERVICE_OBJECT_STORAGE_ACCESS_KEY",
+                    self.object_storage_access_key.get_secret_value().strip(),
+                ),
+                (
+                    "KNOWLEDGE_SERVICE_OBJECT_STORAGE_SECRET_KEY",
+                    self.object_storage_secret_key.get_secret_value().strip(),
+                ),
+                ("KNOWLEDGE_SERVICE_OBJECT_STORAGE_BUCKET", bucket),
+                ("KNOWLEDGE_SERVICE_OBJECT_STORAGE_REGION", region),
+            )
+            if not value
+        ]
+        if missing:
+            raise ValueError("对象存储后端为 s3 时必须配置：" + "、".join(missing))
+        if not endpoint.startswith(("http://", "https://")):
+            raise ValueError("KNOWLEDGE_SERVICE_OBJECT_STORAGE_ENDPOINT_URL 必须是 http(s) 地址")
+        if "oss-" in region or "." in region or "/" in region:
+            raise ValueError(
+                "KNOWLEDGE_SERVICE_OBJECT_STORAGE_REGION 填地域 ID（如 cn-hangzhou），"
+                "不是 oss-cn-hangzhou"
+            )
+        self.object_storage_endpoint_url = endpoint.rstrip("/")
+        self.object_storage_bucket = bucket
+        self.object_storage_region = region
         return self
 
 

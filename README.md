@@ -1,6 +1,6 @@
 # 可嵌入的知识库模块
 
-本项目既支持独立启动验证，也支持嵌入 `E:\llmpython\test_agent`。独立运行时使用本项目 `.env` 和 `main.py`；嵌入宿主时由 `test_agent` 创建 FastAPI 应用、复用宿主普通业务鉴权和数据库配置，但公司凭据管理 API 始终要求管理员 Bearer。离线入库在应用进程内执行，向量持久化到 ChromaDB 本地目录；入库所需的服务端临时副本默认保存在本地目录，服务器部署时可切换到 RustFS/S3。
+本项目既支持独立启动验证，也支持嵌入 `E:\llmpython\test_agent`。独立运行时使用本项目 `.env` 和 `main.py`；嵌入宿主时由 `test_agent` 创建 FastAPI 应用、复用宿主普通业务鉴权和数据库配置，但公司凭据管理 API 始终要求管理员 Bearer。离线入库在应用进程内执行，向量持久化到 ChromaDB 本地目录；入库所需的服务端临时副本默认保存在本地目录，服务器部署时可切换到阿里云 OSS。
 
 设计文档：[架构](ARCHITECTURE.md)、[数据库表结构](DATABASE_SCHEMA.md)、[接口文档](API_DOCUMENTATION.md)、[百度千帆 OCR 配置](OCR_HTTP_SERVICE.md)。
 
@@ -11,7 +11,7 @@
 - Python 3.11+
 - 独立知识库项目使用 `uv` 管理依赖
 - MySQL 8.0+
-- RustFS（可选，仅使用 S3 对象存储时需要）
+- 阿里云 OSS（可选，仅使用对象存储时需要）
 
 ## 独立启动验证
 
@@ -63,11 +63,7 @@ provision-knowledge-catalog --env
 python main.py
 ```
 
-默认使用本地文件存储，无需启动 RustFS。上传、解析、切分、Embedding 和 Chroma 写入由 FastAPI lifespan 管理，不需额外启动 Celery Worker、Redis 队列或 Outbox 派发器。知识库支持常见文本、PDF、Word、Excel、PowerPoint、RTF、HTML、CSV、JSON 和图片；扫描 PDF、图片通过百度千帆视觉模型识别，旧版 Office 文件需要 LibreOffice 转换。仅当把 `KNOWLEDGE_SERVICE_OBJECT_STORAGE_BACKEND` 设为 `s3` 时，才需要启动 RustFS 或配置其他 S3 服务：
-
-```powershell
-docker compose --env-file E:\llmpython\test_agent\.env -f compose.infra.yaml up -d rustfs
-```
+默认使用本地文件存储。上传、解析、切分、Embedding 和 Chroma 写入由 FastAPI lifespan 管理，不需额外启动 Celery Worker、Redis 队列或 Outbox 派发器。知识库支持常见文本、PDF、Word、Excel、PowerPoint、RTF、HTML、CSV、JSON 和图片；扫描 PDF 和图片通过百炼视觉模型识别，可在库内 OCR 档案中切换千帆同步或百度官方异步 PaddleOCR，旧版 Office 文件需要 LibreOffice 转换。管理页的原文件预览内置 PDF、图片、文本、Markdown、HTML、Word、Excel/CSV 和 PPT 渲染；旧版 Office、RTF、ODF 与 TIFF 通过 `/documents/{id}/preview` 服务端转换，其中旧版 Office 同样依赖 LibreOffice（Windows 标准安装目录会自动探测，无需额外配置）。把 `KNOWLEDGE_SERVICE_OBJECT_STORAGE_BACKEND` 设为 `s3` 即改用阿里云 OSS：先在控制台创建私有桶，再按 `.env.example` 填写内网端点（`https://s3.oss-<region>-internal.aliyuncs.com`）、地域 ID 和 RAM 子账号密钥；适配器固定使用 OSS 兼容的 SigV2 + 虚拟主机寻址，不会自动建桶。
 
 API 文档位于宿主应用的 `/docs`，知识库路由默认前缀为 `/api/v1`。接口详情、请求格式和任务状态见 [API_DOCUMENTATION.md](API_DOCUMENTATION.md)。
 
@@ -76,7 +72,7 @@ API 文档位于宿主应用的 `/docs`，知识库路由默认前缀为 `/api/v
 - MySQL 保存公司凭据哈希与启用状态、知识库、模型档案、文档版本、分块、任务与 Outbox；公司 Token 明文不能从数据库恢复。
 - Chroma 向量文件默认位于 `test_agent/data/knowledge_chroma`。
 - 服务端临时副本默认保存在 `KNOWLEDGE_SERVICE_STORAGE_ROOT` 指定的本地目录。
-- 备份时同时保存 MySQL、Chroma 目录和服务端临时副本目录；如果使用 S3，还需备份对应对象存储。
+- 备份时同时保存 MySQL、Chroma 目录和服务端临时副本目录；如果使用 OSS，还需按 OSS 的备份策略保存对象存储。
 
 首次执行迁移前确认 `CHAT_DB_*` 连接的是预期数据库，并先备份。旧项目/凭据/Milvus 档案表保留，迁移不删除历史数据。若旧项目之间有同名知识库，迁移会停止并提示人工处理。
 # 公司级公共知识库服务

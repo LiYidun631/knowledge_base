@@ -73,11 +73,13 @@ class TimestampMixin:
 class ModelProfile(TimestampMixin, Base):
     __tablename__ = "model_profiles"
     __table_args__ = (
-        CheckConstraint("kind IN ('embedding', 'rerank', 'chat')", name="ck_model_profiles_kind"),
+        CheckConstraint(
+            "kind IN ('embedding', 'rerank', 'chat', 'ocr')", name="ck_model_profiles_kind"
+        ),
         UniqueConstraint("kind", "name", name="uq_model_profiles_kind_name"),
         Index("ix_model_profiles_kind_enabled", "kind", "is_enabled"),
         Index("uq_model_profiles_kind_default", "default_kind", unique=True),
-        {"mysql_engine": "InnoDB", "comment": "Embedding、Rerank 与 Chat 模型档案"},
+        {"mysql_engine": "InnoDB", "comment": "Embedding、Rerank、Chat 与 OCR 模型档案"},
     )
 
     id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
@@ -713,6 +715,155 @@ class QAEvent(TimestampMixin, Base):
     error_code: Mapped[str | None] = mapped_column(String(100))
     message: Mapped[str | None] = mapped_column(String(1000))
     details: Mapped[dict[str, Any]] = mapped_column(json_type, default=dict, nullable=False)
+
+
+class AppProject(TimestampMixin, Base):
+    """接入方项目登记；项目轨迹按项目隔离，并按各自保留天数定期清理。"""
+
+    __tablename__ = "app_projects"
+    __table_args__ = (
+        UniqueConstraint("project_key", name="uq_app_projects_project_key"),
+        {"mysql_engine": "InnoDB", "comment": "接入项目登记与轨迹保留策略"},
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    # 调用方通过 X-Project-Key 传入的稳定标识，创建后不建议修改。
+    project_key: Mapped[str] = mapped_column(String(80), nullable=False)
+    display_name: Mapped[str] = mapped_column(String(160), nullable=False)
+    description: Mapped[str | None] = mapped_column(String(1000))
+    is_enabled: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default=text("1"), nullable=False
+    )
+    retention_days: Mapped[int] = mapped_column(
+        Integer, default=90, server_default=text("90"), nullable=False
+    )
+    # 惰性清理标记：写入轨迹时每天最多触发一次过期数据删除。
+    last_purged_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+
+
+class ProjectQaTrace(TimestampMixin, Base):
+    """外部项目的一次问答请求轨迹；检索阶段先落库，项目回答完成后回填答案。"""
+
+    __tablename__ = "project_qa_traces"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('running', 'success', 'no_results', 'failed', 'clarification')",
+            name="ck_project_qa_traces_status",
+        ),
+        UniqueConstraint(
+            "company_id",
+            "project_id",
+            "external_request_id",
+            name="uq_project_qa_traces_request",
+        ),
+        Index("ix_project_qa_traces_company_created", "company_id", "created_at"),
+        Index("ix_project_qa_traces_project_created", "project_id", "created_at"),
+        Index("ix_project_qa_traces_kb_created", "knowledge_base_id", "created_at"),
+        Index("ix_project_qa_traces_status_created", "status", "created_at"),
+        Index("ix_project_qa_traces_session_created", "session_ref", "created_at"),
+        {"mysql_engine": "InnoDB", "comment": "外部项目问答轨迹与检索摘要"},
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    company_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("companies.id", ondelete="RESTRICT"), nullable=False
+    )
+    project_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("app_projects.id", ondelete="RESTRICT"), nullable=False
+    )
+    knowledge_base_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("knowledge_bases.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    # 调用方自己的请求 ID，用于检索记录与完成回填对齐；同一项目内唯一。
+    external_request_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    # 调用方会话标识，统一转成字符串保存，不建立外键。
+    session_ref: Mapped[str | None] = mapped_column(String(128))
+    # 仅保存调用方用户标识的哈希，避免在知识库侧留存明文账号。
+    user_ref: Mapped[str | None] = mapped_column(String(64))
+    query: Mapped[str] = mapped_column(Text, nullable=False)
+    answer: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(20), default="running", nullable=False)
+    # 回答路径：rag / direct / clarification / chat / health_data / report / refusal 等。
+    answer_mode: Mapped[str | None] = mapped_column(String(40))
+    intent: Mapped[dict[str, Any]] = mapped_column(json_type, default=dict, nullable=False)
+    chat_provider: Mapped[str | None] = mapped_column(String(80))
+    chat_model_name: Mapped[str | None] = mapped_column(String(200))
+    retrieval_mode: Mapped[str | None] = mapped_column(String(20))
+    top_k: Mapped[int | None] = mapped_column(Integer)
+    include_context: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    product_name: Mapped[str | None] = mapped_column(String(200))
+    model_name: Mapped[str | None] = mapped_column(String(200))
+    # 每次检索尝试一行摘要；source 表通过 attempt_index 关联具体命中。
+    retrieval_attempts: Mapped[list[dict[str, Any]]] = mapped_column(
+        json_type, default=list, nullable=False
+    )
+    result_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    source_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    top_rerank_score: Mapped[float | None] = mapped_column(Float)
+    retrieval_duration_ms: Mapped[int | None] = mapped_column(Integer)
+    generation_duration_ms: Mapped[int | None] = mapped_column(Integer)
+    total_duration_ms: Mapped[int | None] = mapped_column(Integer)
+    prompt_tokens: Mapped[int | None] = mapped_column(Integer)
+    completion_tokens: Mapped[int | None] = mapped_column(Integer)
+    total_tokens: Mapped[int | None] = mapped_column(Integer)
+    error_code: Mapped[str | None] = mapped_column(String(100))
+    error_message: Mapped[str | None] = mapped_column(Text)
+    finished_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    extra_metadata: Mapped[dict[str, Any]] = mapped_column(
+        json_type, default=dict, nullable=False
+    )
+
+
+class ProjectQaSource(TimestampMixin, Base):
+    """项目轨迹的召回片段快照；文档删除后仍保留回答当时的正文与分数。"""
+
+    __tablename__ = "project_qa_sources"
+    __table_args__ = (
+        UniqueConstraint(
+            "trace_id", "attempt_index", "rank", name="uq_project_qa_sources_rank"
+        ),
+        Index("ix_project_qa_sources_trace_attempt", "trace_id", "attempt_index"),
+        Index("ix_project_qa_sources_company_created", "company_id", "created_at"),
+        Index("ix_project_qa_sources_document", "document_id"),
+        {"mysql_engine": "InnoDB", "comment": "项目轨迹召回片段与文本快照"},
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    company_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("companies.id", ondelete="RESTRICT"), nullable=False
+    )
+    trace_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("project_qa_traces.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    # 同一次项目请求内的第几次检索，从 0 开始。
+    attempt_index: Mapped[int] = mapped_column(
+        Integer, default=0, server_default=text("0"), nullable=False
+    )
+    rank: Mapped[int] = mapped_column(Integer, nullable=False)
+    document_id: Mapped[UUID | None] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("documents.id", ondelete="SET NULL")
+    )
+    document_version_id: Mapped[UUID | None] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("document_versions.id", ondelete="SET NULL")
+    )
+    chunk_id: Mapped[UUID | None] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("document_chunks.id", ondelete="SET NULL")
+    )
+    filename: Mapped[str] = mapped_column(String(500), nullable=False)
+    version_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    page_number: Mapped[int | None] = mapped_column(Integer)
+    section: Mapped[str | None] = mapped_column(String(500))
+    content_snapshot: Mapped[str] = mapped_column(Text, nullable=False)
+    context_snapshot: Mapped[str | None] = mapped_column(Text)
+    cosine_distance: Mapped[float | None] = mapped_column(Float)
+    bm25_score: Mapped[float | None] = mapped_column(Float)
+    rrf_score: Mapped[float | None] = mapped_column(Float)
+    rerank_score: Mapped[float | None] = mapped_column(Float)
+    asset_ids: Mapped[list[str]] = mapped_column(json_type, default=list, nullable=False)
 
 
 class OutboxEvent(TimestampMixin, Base):

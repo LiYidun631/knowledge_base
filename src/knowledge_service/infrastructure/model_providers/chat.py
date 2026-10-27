@@ -204,7 +204,8 @@ async def _build_request(
     body = {
         "model": model_name,
         "temperature": settings.chat_temperature,
-        # qwen3 系列模型在 DashScope 默认开启思考，几十字答案也会先思考十几秒；忠实还原任务不需要思考。
+        # qwen3 系列在 DashScope 默认开启思考，几十字答案也会先思考十几秒；
+        # 忠实还原任务不需要思考。
         "enable_thinking": False,
         "messages": [
             {
@@ -457,7 +458,9 @@ async def generate_faq_pairs(
         # 模型偶尔在 JSON 外附加说明，退回到首尾括号截取再解析。
         start, end = text.find("["), text.rfind("]")
         if start == -1 or end <= start:
-            raise ChatProviderError("CHAT_RESPONSE_INVALID: FAQ 生成结果不是 JSON 数组")
+            raise ChatProviderError(
+                "CHAT_RESPONSE_INVALID: FAQ 生成结果不是 JSON 数组"
+            ) from None
         try:
             pairs = json.loads(text[start : end + 1])
         except ValueError as fallback_exc:

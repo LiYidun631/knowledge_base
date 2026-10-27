@@ -192,7 +192,9 @@ async def archive_knowledge_base(session: AsyncSession, *, knowledge_base_id: UU
     await session.flush()
 
 
-async def restore_knowledge_base(session: AsyncSession, *, knowledge_base_id: UUID) -> KnowledgeBase:
+async def restore_knowledge_base(
+    session: AsyncSession, *, knowledge_base_id: UUID
+) -> KnowledgeBase:
     """恢复已归档知识库为启用状态，文件与向量保持不变。"""
     knowledge_base = await session.scalar(
         select(KnowledgeBase)

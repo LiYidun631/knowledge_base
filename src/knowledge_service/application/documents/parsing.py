@@ -24,6 +24,7 @@ from docx import Document as WordDocument
 from pypdf import PdfReader
 
 from knowledge_service.core.config import get_settings
+from knowledge_service.core.ocr_runtime import get_ocr_runtime, use_ocr_runtime
 from knowledge_service.infrastructure.ocr_client import (
     LayoutResult,
     OcrServiceError,
@@ -35,6 +36,14 @@ from knowledge_service.infrastructure.ocr_client import (
 
 class DocumentParseError(ValueError):
     """文档无法安全解析，或需要尚未配置的 OCR 服务。"""
+
+
+def _ocr_configured(settings: Any) -> bool:
+    """库内默认 OCR 档案优先，未注入时回落到环境模型名。"""
+    runtime = get_ocr_runtime()
+    if runtime is not None:
+        return bool(runtime.base_url.strip() and runtime.model_name.strip())
+    return bool(settings.ocr_model_name.strip())
 
 
 @dataclass(frozen=True)
@@ -63,7 +72,7 @@ class ParsedBlock:
     page_number: int | None = None
     section: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
-    # 图片原始内容由入库阶段写入本地对象目录或 RustFS。
+    # 图片原始内容由入库阶段写入本地对象目录或 OSS。
     asset_content: bytes | None = None
     asset_media_type: str | None = None
     # 一个表格块可能包含多个图片单元格，因此支持多个资产。
@@ -999,19 +1008,25 @@ def _prewarm_office_image_descriptions(
         return
     workers = max(1, min(int(getattr(settings, "ocr_embedded_concurrency", 3)), 8))
     image_items = list(unique_images.items())
+    runtime = get_ocr_runtime()
+
+    def describe(content: bytes, name: str, media_type: str) -> ParsedAsset:
+        # ThreadPoolExecutor 不会复制上下文，显式注入本次入库解析的 OCR 档案。
+        with use_ocr_runtime(runtime):
+            return _describe_office_image(
+                content,
+                name,
+                media_type,
+                {"source": f"{source}_embedded_image", "asset_name": name},
+                {},
+            )
+
     with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="office-ocr") as pool:
         # 分批提交，既限制模型侧并发，也避免一次向线程池塞入大量待处理图片。
         for start in range(0, len(image_items), workers):
             batch = image_items[start : start + workers]
             futures = {
-                pool.submit(
-                    _describe_office_image,
-                    content,
-                    name,
-                    media_type,
-                    {"source": f"{source}_embedded_image", "asset_name": name},
-                    {},
-                ): digest
+                pool.submit(describe, content, name, media_type): digest
                 for digest, (content, name, media_type) in batch
             }
             for future in as_completed(futures):
@@ -1157,12 +1172,22 @@ def _layout_blocks(
 
 
 def _find_office_converter() -> str | None:
-    """查找配置指定或系统 PATH 中的 LibreOffice 转换程序。"""
+    """查找配置指定、系统 PATH 或 Windows 标准安装目录中的 LibreOffice。"""
     settings = get_settings()
     configured = str(settings.office_converter_path).strip()
     if configured:
         return configured
-    return shutil.which("soffice") or shutil.which("libreoffice")
+    found = shutil.which("soffice") or shutil.which("libreoffice")
+    if found:
+        return found
+    # Windows 默认安装不会把 soffice 加进 PATH，标准安装也应开箱可用。
+    for candidate in (
+        Path(r"C:\Program Files\LibreOffice\program\soffice.exe"),
+        Path(r"C:\Program Files (x86)\LibreOffice\program\soffice.exe"),
+    ):
+        if candidate.is_file():
+            return str(candidate)
+    return None
 
 
 def _convert_legacy_office(content: bytes, source_extension: str, target_extension: str) -> bytes:
@@ -1208,6 +1233,11 @@ def _convert_legacy_office(content: bytes, source_extension: str, target_extensi
         raise DocumentParseError("OFFICE_CONVERSION_TIMEOUT: Office 文件转换超时") from exc
     except OSError as exc:
         raise DocumentParseError("OFFICE_CONVERTER_ERROR: Office 转换程序无法启动") from exc
+
+
+def convert_office_document(filename: str, content: bytes, target_extension: str) -> bytes:
+    """将 Office 文档转换为指定格式，供在线预览等非入库场景复用。"""
+    return _convert_legacy_office(content, Path(filename).suffix.lower(), target_extension)
 
 
 def _parse_doc(content: bytes) -> list[ParsedBlock]:
@@ -1502,7 +1532,7 @@ def _parse_pdf(content: bytes) -> list[ParsedBlock]:
         )
         if (
             getattr(settings, "ocr_layout_analysis_enabled", False)
-            and settings.ocr_model_name.strip()
+            and _ocr_configured(settings)
             and layout_pages
         ):
             layouts = analyze_pdf_pages(
@@ -1554,9 +1584,10 @@ def _parse_pdf(content: bytes) -> list[ParsedBlock]:
                 if blocks and all(block.content.strip() for block in blocks):
                     return blocks
         if missing_pages:
-            if not settings.ocr_model_name.strip():
+            if not _ocr_configured(settings):
                 raise DocumentParseError(
-                    "OCR_REQUIRED: 请在 .env 中配置 KNOWLEDGE_SERVICE_OCR_MODEL_NAME"
+                    "OCR_REQUIRED: 请在模型管理中配置默认 OCR 模型，"
+                    "或在 .env 中配置 KNOWLEDGE_SERVICE_OCR_MODEL_NAME"
                 )
             recognized = recognize_pdf_pages(
                 content,

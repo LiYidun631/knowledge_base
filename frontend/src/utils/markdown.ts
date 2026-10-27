@@ -46,7 +46,7 @@ function renderTable(rows: string[][]): string {
   return `<table><thead>${buildRow(head, 'th')}</thead><tbody>${body.map((row) => buildRow(row, 'td')).join('')}</tbody></table>`
 }
 
-export function renderMarkdown(source: string): string {
+export function renderMarkdown(source: string, headingShift = 2): string {
   const lines = source.replace(/\r\n/g, '\n').split('\n')
   const output: string[] = []
   let paragraph: string[] = []
@@ -92,7 +92,7 @@ export function renderMarkdown(source: string): string {
       flushTable()
       flushParagraph()
       flushList()
-      const level = heading[1].length + 2
+      const level = Math.min(6, heading[1].length + headingShift)
       output.push(`<h${level}>${renderInline(heading[2].trim())}</h${level}>`)
       continue
     }

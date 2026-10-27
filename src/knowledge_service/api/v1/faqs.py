@@ -65,7 +65,10 @@ def _faq_http_error(error: Exception) -> HTTPException:
         return HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(error))
     if isinstance(error, ChatProviderError):
         return HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(error))
-    return HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="FAQ 处理失败，请稍后重试")
+    return HTTPException(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        detail="FAQ 处理失败，请稍后重试",
+    )
 
 
 @router.get("/knowledge-bases/{knowledge_base_id}/faqs", response_model=FaqListResponse)

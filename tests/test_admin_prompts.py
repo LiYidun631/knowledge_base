@@ -9,7 +9,6 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from knowledge_service.core.config import Settings, get_settings
 from knowledge_service.infrastructure.persistence.base import Base
-from knowledge_service.infrastructure.persistence.models import AdminPromptOverride
 from knowledge_service.infrastructure.persistence.session import get_db_session
 
 

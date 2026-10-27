@@ -12,7 +12,9 @@ from knowledge_service.application.documents.parsing import ParsedBlock
 
 def _text(content: str, *, section: str | None = None, **metadata) -> ParsedBlock:
     extra = {"section_path": section.split(" / ")} if section else {}
-    return ParsedBlock(kind="text", content=content, section=section, metadata={**extra, **metadata})
+    return ParsedBlock(
+        kind="text", content=content, section=section, metadata={**extra, **metadata}
+    )
 
 
 def _parents(chunks):

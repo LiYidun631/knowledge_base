@@ -15,7 +15,7 @@
 2. **任务随应用进程运行。** FastAPI lifespan 启动一个轻量异步 Outbox 消费循环。MySQL 保存事件、任务状态和重试时间；应用重启后继续消费未完成任务。不需要 Celery、Redis、单独 Worker 或 Outbox 派发器进程。
 3. **ChromaDB 本地持久化。** Chroma 客户端在 Python 进程内惰性创建，向量文件写入 `.env` 指定的 `KNOWLEDGE_SERVICE_CHROMA_PERSIST_DIRECTORY`。不需要 Milvus、etcd 或 Attu。生产部署必须为该路径配置持久磁盘备份。
 4. **MySQL 保存业务元数据。** 知识库、模型档案、文档逻辑记录、不可变版本、分块、入库任务和事务 Outbox 保存在 MySQL。知识库表与 `test_agent` 复用聊天数据库连接配置。
-5. **本地目录保存服务端临时副本。** 当前默认写入 `.env` 中 `KNOWLEDGE_SERVICE_STORAGE_ROOT` 指定的持久目录，不需要启动 RustFS。部署到服务器后，可把后端切换为 RustFS/S3 兼容存储。
+5. **本地目录保存服务端临时副本。** 当前默认写入 `.env` 中 `KNOWLEDGE_SERVICE_STORAGE_ROOT` 指定的持久目录，不需要外部对象存储。部署到服务器后，可把后端切换为阿里云 OSS。
 6. **公司级隔离。** `company_id` 是上传、检索、向量 metadata 和问答审计的统一边界；旧 project、credential、Milvus profile 表和数据暂作历史保留，不由这次迁移删除。
 7. **建库时绑定模型。** 公司大库创建时自动绑定开发人员在 `.env` 中配置并初始化的默认 Embedding 和 Rerank，业务调用方不能选择或关闭模型；模型一经绑定即锁定。Chroma collection 按 Embedding 档案和维度隔离。
 8. **配置集中在 `.env`。** URL、模型供应商参数和密钥引用从 `.env` 装载；数据库只存 `secret_ref`，不存 API Key。`.env.example` 提供中文说明和默认模板。
@@ -29,7 +29,7 @@ test_agent FastAPI 进程
 ├── 知识库 API（复用宿主认证）
 ├── 应用内异步任务循环
 │   ├── MySQL Outbox / 状态 / 文档版本 / 文本分块
-│   ├── 原文件：本地持久目录（默认）或 RustFS/S3
+│   ├── 原文件：本地持久目录（默认）或阿里云 OSS
 │   ├── Embedding：DashScope 或已登记的其他供应商
 │   └── 向量：ChromaDB PersistentClient -> 本地持久目录
 ├── 在线检索：MySQL BM25 + Chroma 向量召回 -> 加权 RRF -> 可选 Rerank -> 父块与引用
@@ -41,7 +41,7 @@ test_agent FastAPI 进程
 1. 上传接口校验公司、文件大小、扩展名和知识库状态，将入库所需的服务端临时副本存入本地目录或对象存储。
 2. 同一 MySQL 事务中创建/更新逻辑文档，新增不可变文档版本、入库任务与 Outbox 事件。
 3. 应用内消费循环领取事件，更新任务阶段，并从对象存储读取文件、校验 SHA-256。
-4. 解析 TXT、Markdown、PDF、DOC/DOCX、XLS/XLSX、PPT/PPTX、RTF、HTML/XML、CSV、JSON、LOG、OpenDocument 和常见图片，按父子块方式切分。表格、段落、幻灯片、PDF 版面和 HTML 内嵌图片统一生成原文占位符与位置元数据；视觉识别文本只进入召回索引，用户答案按占位符还原图片，不输出图片说明。图片对象保存到本地目录或 RustFS。
+4. 解析 TXT、Markdown、PDF、DOC/DOCX、XLS/XLSX、PPT/PPTX、RTF、HTML/XML、CSV、JSON、LOG、OpenDocument 和常见图片，按父子块方式切分。表格、段落、幻灯片、PDF 版面和 HTML 内嵌图片统一生成原文占位符与位置元数据；视觉识别文本只进入召回索引，用户答案按占位符还原图片，不输出图片说明。图片对象保存到本地目录或 OSS。
 5. 使用知识库绑定的 Embedding 配置分批请求向量。
 6. 以文档版本为范围写入 Chroma；任务重试会清理该版本的部分结果，避免污染其他版本。
 7. 向量写入和 MySQL 分块登记成功后，把新版本标记为当前版本，旧版本历史保留。
@@ -55,7 +55,7 @@ Chroma 与 MySQL 不能参与同一事务。若进程在 Chroma 写入后、MySQ
 
 - **MySQL：** 知识库、模型配置、文档/版本、父子块、BM25 词频倒排表、任务与 Outbox 状态。
 - **Chroma：** Embedding 向量、子块文本及检索 metadata，按模型档案和向量维度分 collection。
-- **本地文件目录（默认）：** 入库所需的服务端临时副本和版面图片按版本使用独立 object key；服务器可选 RustFS/S3。
+- **本地文件目录（默认）：** 入库所需的服务端临时副本和版面图片按版本使用独立 object key；服务器可选阿里云 OSS。
 - **删除操作：** 文件向量删除会移除服务端临时副本和内部图片资产；后台文件系统中的原文件不由本服务删除。
 - **`.env`：** 数据库连接来源、对象存储访问参数、模型 URL、密钥映射及切分/重试参数。
 
@@ -73,7 +73,7 @@ Chroma 目录是必须备份的业务数据。当前部署应采用单应用实�
 - `knowledge_service` 模块源码位于宿主 `src/knowledge_service`。
 - 应用仍只需启动原有 `python main.py` / PyCharm Run 配置；入库任务循环由应用 lifespan 启停。
 - 需运行 Alembic 数据迁移，并登记默认 DashScope Embedding、Rerank 档案。
-- 当前本地配置直接写入文件目录，不需要启动 RustFS；服务器改用 S3 时再部署 RustFS 或配置其他 S3 存储。
+- 当前本地配置直接写入文件目录，不需要外部对象存储；服务器改用对象存储时配置阿里云 OSS。
 - Chroma 数据保存在 `.env` 的目录中，不能放在临时目录或容器易失层。
 
 ## 8. 在线检索

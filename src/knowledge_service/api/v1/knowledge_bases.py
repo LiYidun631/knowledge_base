@@ -54,7 +54,9 @@ async def list_knowledge_bases(
     session: Annotated[AsyncSession, Depends(get_db_session, scope="function")],
     offset: Annotated[int, Query(ge=0, description="跳过的记录数。")] = 0,
     limit: Annotated[int, Query(ge=1, le=200, description="每页记录数，最大 200。")] = 50,
-    include_archived: Annotated[bool, Query(description="为 true 时同时返回已归档知识库。")] = False,
+    include_archived: Annotated[
+        bool, Query(description="为 true 时同时返回已归档知识库。")
+    ] = False,
 ) -> list[KnowledgeBaseRead]:
     items = await service.list_knowledge_bases(
         session,

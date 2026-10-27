@@ -5,6 +5,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import type { TableInstance } from 'element-plus'
 import { client, errorMessage, errorText } from '../api/client'
 import FaqPanel from '../components/FaqPanel.vue'
+import DocumentPreviewDrawer from '../components/DocumentPreviewDrawer.vue'
 import { resolveInlineImages } from '../utils/assets'
 import { escapeHtml, renderMarkdown } from '../utils/markdown'
 
@@ -811,7 +812,7 @@ async function submitMove() {
 
 // 用 axios 取文件二进制再交给浏览器，保证携带管理员 Token 鉴权头。
 async function fetchFileBlob(
-  item: DocumentItem,
+  item: { id: string },
   disposition: 'inline' | 'attachment' = 'attachment',
 ): Promise<Blob> {
   const { data } = await client.get<Blob>(`/documents/${item.id}/file`, {
@@ -821,61 +822,16 @@ async function fetchFileBlob(
   return data
 }
 
-// 右侧抽屉预览：PDF/图片/文本可直接内嵌渲染，其他格式提示下载。
-const filePreview = reactive({
-  visible: false,
-  loading: false,
-  url: '',
-  filename: '',
-  supported: false,
-  item: null as DocumentItem | null,
-})
+// 多格式预览交给独立抽屉组件：PDF/图片/文本/Office/表格/PPT 各有渲染分支。
+const previewVisible = ref(false)
+const previewItem = ref<DocumentItem | null>(null)
 
-function isInlinePreviewable(mediaType: string): boolean {
-  return (
-    mediaType === 'application/pdf' ||
-    mediaType.startsWith('image/') ||
-    mediaType.startsWith('text/')
-  )
+function previewFile(item: DocumentItem) {
+  previewItem.value = item
+  previewVisible.value = true
 }
 
-// 预览请求序号：快速切换文件时丢弃旧请求的结果，避免旧文件状态覆盖新文件。
-let previewRequestId = 0
-
-async function previewFile(item: DocumentItem) {
-  const requestId = ++previewRequestId
-  filePreview.item = item
-  filePreview.filename = item.filename
-  filePreview.url = ''
-  filePreview.supported = false
-  filePreview.loading = true
-  filePreview.visible = true
-  try {
-    const blob = await fetchFileBlob(item, 'inline')
-    if (requestId !== previewRequestId) return
-    const mediaType = blob.type || 'application/octet-stream'
-    filePreview.supported = isInlinePreviewable(mediaType)
-    if (filePreview.supported) filePreview.url = URL.createObjectURL(blob)
-  } catch (error) {
-    if (requestId !== previewRequestId) return
-    errorMessage(error, '预览原文件失败')
-    filePreview.visible = false
-  } finally {
-    if (requestId === previewRequestId) filePreview.loading = false
-  }
-}
-
-function closeFilePreview() {
-  if (filePreview.url) {
-    URL.revokeObjectURL(filePreview.url)
-    filePreview.url = ''
-  }
-  filePreview.visible = false
-  filePreview.loading = false
-  filePreview.item = null
-}
-
-async function downloadFile(item: DocumentItem) {
+async function downloadFile(item: { id: string; filename: string }) {
   try {
     const blob = await fetchFileBlob(item)
     const url = URL.createObjectURL(blob)
@@ -1673,33 +1629,11 @@ onMounted(async () => {
     </el-dialog>
 
     <!-- 原文件预览 -->
-    <el-drawer
-      v-model="filePreview.visible"
-      :title="filePreview.filename"
-      size="72%"
-      @closed="closeFilePreview"
-    >
-      <div v-loading="filePreview.loading" class="file-preview-body">
-        <iframe
-          v-if="filePreview.supported && filePreview.url"
-          :src="filePreview.url"
-          class="file-preview-frame"
-          :title="filePreview.filename"
-        />
-        <el-empty
-          v-else-if="!filePreview.loading"
-          :description="`「${filePreview.filename}」格式暂不支持在线预览`"
-        >
-          <el-button
-            v-if="filePreview.item"
-            type="primary"
-            @click="downloadFile(filePreview.item)"
-          >
-            下载原文件
-          </el-button>
-        </el-empty>
-      </div>
-    </el-drawer>
+    <DocumentPreviewDrawer
+      v-model="previewVisible"
+      :item="previewItem"
+      @download="downloadFile"
+    />
   </el-card>
 </template>
 
@@ -2051,16 +1985,6 @@ onMounted(async () => {
 .chunk-content :deep(td img.md-image) {
   max-height: 120px;
   margin: 2px 4px 2px 0;
-}
-.file-preview-body {
-  min-height: 320px;
-}
-.file-preview-frame {
-  width: 100%;
-  height: calc(100vh - 140px);
-  border: none;
-  border-radius: 10px;
-  background: #fff;
 }
 .child-chunk {
   border-left: 3px solid var(--el-color-primary-light-5);
