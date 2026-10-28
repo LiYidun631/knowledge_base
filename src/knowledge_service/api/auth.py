@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from hmac import compare_digest
 from typing import Annotated
 from uuid import UUID
@@ -23,6 +24,32 @@ from knowledge_service.infrastructure.persistence.session import get_db_session
 
 bearer_scheme = HTTPBearer(auto_error=False, scheme_name="KnowledgeServiceBearer")
 
+ADMIN_ROLES = frozenset({"admin", "operator", "viewer"})
+BOOTSTRAP_ADMIN_NAME = "环境引导 Token"
+
+_READ_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+# 只读角色仍可发起问答与检索：这类 POST 只产生查询记录，不改配置数据。
+_VIEWER_POST_SUFFIXES = ("/ask", "/ask/stream", "/search")
+# 凭据、模型配置、提示词与审计属于管理员专属范围，运营/只读角色一律拒绝。
+_ADMIN_ONLY_SEGMENTS = frozenset(
+    {"credentials", "tokens", "model-profiles", "model-prices", "prompts", "audit-logs"}
+)
+
+
+@dataclass(frozen=True)
+class ServicePrincipal:
+    """一次请求的调用者身份；company_id 为空表示管理员侧凭据。"""
+
+    role: str
+    name: str
+    company_id: UUID | None = None
+    credential_id: UUID | None = None
+    is_bootstrap: bool = False
+
+    @property
+    def is_admin_side(self) -> bool:
+        return self.company_id is None
+
 
 def read_service_token(
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer_scheme)],
@@ -46,42 +73,70 @@ def read_service_token(
 
 
 async def authenticate_service(
+    request: Request,
     token: Annotated[str | None, Depends(read_service_token)],
     session: Annotated[AsyncSession, Depends(get_db_session)],
-) -> UUID | None:
-    # None 只表示已验证的管理员（.env 引导 Token 或库内管理员凭据）。
+) -> ServicePrincipal:
     if token is None:
-        return None
-    admin_id = await session.scalar(
-        select(AdminCredential.id).where(
-            AdminCredential.token_hash == hash_admin_token(token),
-            AdminCredential.is_enabled.is_(True),
-        )
-    )
-    if admin_id is not None:
-        return None
-    company_id = await session.scalar(
-        select(CompanyCredential.company_id).where(
-            CompanyCredential.token_hash == hash_company_token(token),
-            CompanyCredential.is_enabled.is_(True),
-        )
-    )
-    if company_id is None:
-        raise HTTPException(
-            status_code=401,
-            detail="缺少或无效的知识库访问凭据",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    # 每个请求重新查库，不缓存鉴权结果，重置或停用后新请求立即失效。
-    return company_id
+        principal = ServicePrincipal(role="admin", name=BOOTSTRAP_ADMIN_NAME, is_bootstrap=True)
+    else:
+        admin = (
+            await session.execute(
+                select(
+                    AdminCredential.id,
+                    AdminCredential.name,
+                    AdminCredential.role,
+                ).where(
+                    AdminCredential.token_hash == hash_admin_token(token),
+                    AdminCredential.is_enabled.is_(True),
+                )
+            )
+        ).first()
+        if admin is not None:
+            # 库里出现未知角色时按只读处理，避免配置错误放大权限。
+            role = admin.role if admin.role in ADMIN_ROLES else "viewer"
+            principal = ServicePrincipal(role=role, name=admin.name, credential_id=admin.id)
+        else:
+            company_id = await session.scalar(
+                select(CompanyCredential.company_id).where(
+                    CompanyCredential.token_hash == hash_company_token(token),
+                    CompanyCredential.is_enabled.is_(True),
+                )
+            )
+            if company_id is None:
+                raise HTTPException(
+                    status_code=401,
+                    detail="缺少或无效的知识库访问凭据",
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+            # 每个请求重新查库，不缓存鉴权结果，重置或停用后新请求立即失效。
+            principal = ServicePrincipal(role="company", name="公司凭据", company_id=company_id)
+    # 审计中间件在响应阶段从请求状态读取操作者身份。
+    request.state.service_principal = principal
+    return principal
+
+
+def _enforce_admin_role(request: Request, principal: ServicePrincipal) -> None:
+    """按角色拦截管理端请求；管理员不受限制。"""
+    if principal.role == "admin":
+        return
+    segments = set(request.url.path.strip("/").split("/"))
+    if segments & _ADMIN_ONLY_SEGMENTS:
+        raise HTTPException(status_code=403, detail="该操作需要管理员凭据")
+    if principal.role == "viewer" and request.method not in _READ_METHODS:
+        # 问答与检索是只读角色的正常用法，不按写操作拦截。
+        if not request.url.path.endswith(_VIEWER_POST_SUFFIXES):
+            raise HTTPException(status_code=403, detail="只读凭据不能执行写操作")
 
 
 async def require_admin_service_auth(
-    company_id: Annotated[UUID | None, Depends(authenticate_service)],
+    request: Request,
+    principal: Annotated[ServicePrincipal, Depends(authenticate_service)],
 ) -> None:
-    """有效公司 Token 与无效凭据都不得进入管理端接口。"""
-    if company_id is not None:
+    """有效公司 Token 与无效凭据都不得进入管理端接口，并在此执行角色拦截。"""
+    if principal.company_id is not None:
         raise HTTPException(status_code=403, detail="该操作需要管理员凭据")
+    _enforce_admin_role(request, principal)
 
 
 def _parse_scope_id(value: str) -> UUID:
@@ -93,13 +148,15 @@ def _parse_scope_id(value: str) -> UUID:
 
 async def require_service_auth(
     request: Request,
-    company_id: Annotated[UUID | None, Depends(authenticate_service)],
+    principal: Annotated[ServicePrincipal, Depends(authenticate_service)],
     session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> None:
-    """统一校验公司和资源归属，防止只传资源 ID 的接口绕过租户隔离。"""
-    if company_id is None:
+    """统一校验公司、资源归属和角色，防止只传资源 ID 的接口绕过租户隔离。"""
+    if principal.company_id is None:
+        _enforce_admin_role(request, principal)
         return
 
+    company_id = principal.company_id
     path_params = request.path_params
     for supplied in (
         path_params.get("company_id"),
@@ -134,11 +191,10 @@ async def require_service_auth(
 
     if not resource_queries and "company_id" not in path_params:
         # 无归属入口仅开放按公司列表与全局产品目录只读；其余入口仅允许管理员。
-        if (
-            request.method != "GET"
-            or request.scope["route"].name
-            not in {"list_knowledge_bases", "list_product_catalog"}
-        ):
+        if request.method != "GET" or request.scope["route"].name not in {
+            "list_knowledge_bases",
+            "list_product_catalog",
+        }:
             raise HTTPException(status_code=403, detail="该操作需要管理员凭据")
 
     active_company = await session.scalar(

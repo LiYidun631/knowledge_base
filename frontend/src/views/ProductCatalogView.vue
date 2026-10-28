@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
+import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { client, errorMessage } from '../api/client'
+import { canWrite } from '../api/session'
 
 interface CatalogEntry {
   id: string
@@ -15,6 +17,7 @@ const loading = ref(false)
 const searchText = ref('')
 const productFilter = ref('')
 const selectedRows = ref<CatalogEntry[]>([])
+const route = useRoute()
 
 const addForm = reactive({
   productName: '',
@@ -164,7 +167,11 @@ function formatDateTime(value: string): string {
   return value.slice(0, 19).replace('T', ' ')
 }
 
-onMounted(loadEntries)
+onMounted(() => {
+  // 全局搜索跳转时带上关键词，进入即过滤目录。
+  if (typeof route.query.q === 'string') searchText.value = route.query.q
+  void loadEntries()
+})
 </script>
 
 <template>
@@ -185,24 +192,26 @@ onMounted(loadEntries)
     />
 
     <div class="controls-row">
-      <el-input
-        v-model="addForm.productName"
-        maxlength="200"
-        placeholder="产品名称，如：体温计"
-        class="add-input"
-        @keyup.enter="createEntry"
-      />
-      <el-input
-        v-model="addForm.modelName"
-        maxlength="200"
-        placeholder="产品型号，如：额式体温计"
-        class="add-input"
-        @keyup.enter="createEntry"
-      />
-      <el-button type="primary" :loading="addForm.submitting" @click="createEntry">
-        添加条目
-      </el-button>
-      <el-divider direction="vertical" class="controls-divider" />
+      <template v-if="canWrite">
+        <el-input
+          v-model="addForm.productName"
+          maxlength="200"
+          placeholder="产品名称，如：体温计"
+          class="add-input"
+          @keyup.enter="createEntry"
+        />
+        <el-input
+          v-model="addForm.modelName"
+          maxlength="200"
+          placeholder="产品型号，如：额式体温计"
+          class="add-input"
+          @keyup.enter="createEntry"
+        />
+        <el-button type="primary" :loading="addForm.submitting" @click="createEntry">
+          添加条目
+        </el-button>
+        <el-divider direction="vertical" class="controls-divider" />
+      </template>
       <el-input
         v-model="searchText"
         clearable
@@ -220,6 +229,7 @@ onMounted(loadEntries)
         <el-option v-for="name in productNames" :key="name" :label="name" :value="name" />
       </el-select>
       <el-button
+        v-if="canWrite"
         type="danger"
         plain
         :disabled="selectedRows.length === 0"
@@ -235,13 +245,13 @@ onMounted(loadEntries)
       empty-text="目录为空，请在上方添加产品名称与型号"
       @selection-change="onSelectionChange"
     >
-      <el-table-column type="selection" width="46" />
+      <el-table-column v-if="canWrite" type="selection" width="46" />
       <el-table-column prop="product_name" label="产品名称" min-width="200" />
       <el-table-column prop="model_name" label="产品型号" min-width="240" />
       <el-table-column label="登记时间" width="180">
         <template #default="{ row }">{{ formatDateTime(row.created_at) }}</template>
       </el-table-column>
-      <el-table-column label="操作" width="140" fixed="right">
+      <el-table-column v-if="canWrite" label="操作" width="140" fixed="right">
         <template #default="{ row }">
           <div class="catalog-actions">
             <el-button size="small" text type="primary" @click="openEdit(row)">编辑</el-button>

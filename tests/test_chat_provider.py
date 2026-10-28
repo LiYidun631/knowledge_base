@@ -114,9 +114,7 @@ def test_answer_context_renders_marker_images_in_position(monkeypatch) -> None:
     )
     result = SimpleNamespace(
         content=(
-            "步骤一：安装电池。"
-            f"{marker}"
-            " 步骤二：开机。[[KB_ASSET_KEY:assets/doc-1/missing.png]]"
+            f"步骤一：安装电池。{marker} 步骤二：开机。[[KB_ASSET_KEY:assets/doc-1/missing.png]]"
         ),
         context=None,
         assets=[asset],
@@ -358,16 +356,12 @@ def test_generate_answer_uses_chat_profile_settings(monkeypatch) -> None:
     )
 
     answer = asyncio.run(
-        chat.generate_answer(
-            query="怎么开机？", context="开机：长按电源键三秒。", profile=profile
-        )
+        chat.generate_answer(query="怎么开机？", context="开机：长按电源键三秒。", profile=profile)
     )
 
     assert answer == "档案答案"
     assert captured["model"] == "qwen-plus"
-    assert captured["url"] == (
-        "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
-    )
+    assert captured["url"] == ("https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions")
     assert captured["temperature"] == 0.0
     assert "<knowledge_context>" in captured["messages"][1]["content"]
 
@@ -389,9 +383,7 @@ def test_generate_answer_rejects_chat_profile_without_secret(monkeypatch) -> Non
     )
 
     with pytest.raises(chat.ChatProviderError, match="CHAT_SECRET_MISSING"):
-        asyncio.run(
-            chat.generate_answer(query="问题", context="资料", profile=profile)
-        )
+        asyncio.run(chat.generate_answer(query="问题", context="资料", profile=profile))
 
 
 def test_generate_answer_stream_yields_delta_chunks(monkeypatch) -> None:
@@ -495,6 +487,7 @@ def _collect_stream_events(
     finished: dict,
     query: str = "退款期限是多少？",
     faq=None,
+    faq_objects: dict | None = None,
 ) -> list[tuple[str, dict]]:
     """驱动 _stream_qa_events 并解析出 (事件名, 数据) 序列。"""
     settings = Settings(
@@ -528,8 +521,14 @@ def _collect_stream_events(
 
     monkeypatch.setattr(answer_module, "get_session_factory", lambda: FakeFailureSession)
 
-    async def fake_scalar(*_args, **_kwargs):
-        return None
+    class FakeSession:
+        """FAQ 引用解析会按主键取文档/版本，这里直接给测试替身。"""
+
+        async def scalar(self, *_args, **_kwargs):
+            return None
+
+        async def get(self, _model, ident):
+            return (faq_objects or {}).get(ident)
 
     async def fake_finish_success(_session, _record, **kwargs):
         finished["success"] = kwargs
@@ -565,7 +564,7 @@ def _collect_stream_events(
     async def collect() -> list[tuple[str, dict]]:
         events: list[tuple[str, dict]] = []
         async for frame in answer_module._stream_qa_events(
-            session=SimpleNamespace(scalar=fake_scalar),
+            session=FakeSession(),
             record=record,
             knowledge_base=SimpleNamespace(id=UUID("00000000-0000-0000-0000-0000000000bb")),
             knowledge_base_id=UUID("00000000-0000-0000-0000-0000000000bb"),
@@ -659,8 +658,12 @@ def test_stream_qa_events_faq_direct_answer_skips_search_and_model(monkeypatch) 
     async def fake_search(*_args, **_kwargs):
         raise AssertionError("FAQ 命中后不应再检索")
 
-    faq_entry = SimpleNamespace(id=UUID("00000000-0000-0000-0000-0000000000dd"))
-    faq_entry.answer = "长按电源键三秒即可开机。"
+    faq_entry = SimpleNamespace(
+        id=UUID("00000000-0000-0000-0000-0000000000dd"),
+        answer="长按电源键三秒即可开机。",
+        document_id=None,
+        document_version_id=None,
+    )
 
     finished: dict[str, object] = {}
     events = _collect_stream_events(
@@ -683,6 +686,57 @@ def test_stream_qa_events_faq_direct_answer_skips_search_and_model(monkeypatch) 
     assert "failure" not in finished
 
 
+def test_stream_qa_events_faq_document_answer_includes_source(monkeypatch) -> None:
+    """文档级 FAQ 直出时 done 带原文档引用，与 /ask 响应结构一致。"""
+
+    document_id = UUID("00000000-0000-0000-0000-0000000000d1")
+    version_id = UUID("00000000-0000-0000-0000-0000000000d2")
+    document = SimpleNamespace(
+        id=document_id,
+        filename="腕式血压计说明书.pdf",
+        latest_version_number=2,
+    )
+    version = SimpleNamespace(
+        id=version_id,
+        filename="腕式血压计说明书.pdf",
+        version_number=2,
+    )
+    faq_entry = SimpleNamespace(
+        id=UUID("00000000-0000-0000-0000-0000000000dd"),
+        answer="掌心向上，将腕带套在裸露的手腕上。",
+        document_id=document_id,
+        document_version_id=version_id,
+    )
+
+    async def fake_search(*_args, **_kwargs):
+        raise AssertionError("FAQ 命中后不应再检索")
+
+    finished: dict[str, object] = {}
+    events = _collect_stream_events(
+        monkeypatch,
+        search=fake_search,
+        finished=finished,
+        query="怎么戴腕带？",
+        faq=faq_entry,
+        faq_objects={document_id: document, version_id: version},
+    )
+
+    assert [name for name, _ in events] == ["meta", "done"]
+    done = events[-1][1]
+    assert done["faq_matched"] is True
+    assert len(done["sources"]) == 1
+    source = done["sources"][0]["source"]
+    assert source["document_id"] == str(document_id)
+    assert source["document_version_id"] == str(version_id)
+    assert source["filename"] == "腕式血压计说明书.pdf"
+    assert source["version_number"] == 2
+    # 直出来源没有检索分数，不应参与低分待补资料判定。
+    assert done["sources"][0]["scores"]["rerank_score"] is None
+    assert done["sources"][0]["content"] == faq_entry.answer
+    assert finished["success"]["faq_matched"] is True
+    assert finished["success"]["results"][0].filename == "腕式血压计说明书.pdf"
+
+
 def test_stream_qa_events_faq_miss_falls_through_to_search(monkeypatch) -> None:
     """FAQ 未命中时继续走检索生成流程，done 不带 faq_matched 标记。"""
 
@@ -701,4 +755,3 @@ def test_stream_qa_events_faq_miss_falls_through_to_search(monkeypatch) -> None:
     assert names == ["meta", "delta", "done"]
     assert events[-1][1]["faq_matched"] is False
     assert "success" in finished
-

@@ -2,6 +2,7 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { client, errorMessage } from '../api/client'
+import { canWrite } from '../api/session'
 import { renderMarkdown } from '../utils/markdown'
 
 interface FaqEntry {
@@ -28,7 +29,7 @@ interface FaqListResponse {
   items: FaqEntry[]
 }
 
-const props = defineProps<{ kbId: string }>()
+const props = defineProps<{ kbId: string; initialQuery?: string }>()
 
 const faqs = ref<FaqEntry[]>([])
 const documents = ref<DocOption[]>([])
@@ -299,6 +300,8 @@ async function generateBatch() {
 
 onMounted(async () => {
   if (!props.kbId) return
+  // 全局搜索跳转过来时预填关键词，省去重输。
+  if (props.initialQuery) q.value = props.initialQuery
   await loadDocuments()
   await load()
 })
@@ -353,11 +356,11 @@ onMounted(async () => {
         </el-select>
         <span class="bar-spacer" />
         <el-button size="small" circle :icon="'Refresh'" title="刷新" @click="load" />
-        <el-button size="small" type="primary" plain :icon="'Plus'" @click="openAdd">
+        <el-button v-if="canWrite" size="small" type="primary" plain :icon="'Plus'" @click="openAdd">
           添加
         </el-button>
         <el-button
-          v-if="generateDoc"
+          v-if="canWrite && generateDoc"
           size="small"
           type="success"
           plain
@@ -368,6 +371,7 @@ onMounted(async () => {
           本文档生成
         </el-button>
         <el-button
+          v-if="canWrite"
           size="small"
           type="warning"
           plain
@@ -454,15 +458,17 @@ onMounted(async () => {
             更新于 {{ formatDateTime(selected.updated_at) }}
           </span>
           <div class="foot-actions">
-            <el-button size="small" plain :icon="'MagicStick'" @click="openRewrite">
-              AI 改写
-            </el-button>
-            <el-button size="small" plain :icon="'Edit'" @click="openEdit(selected)">
-              编辑
-            </el-button>
-            <el-button size="small" plain type="danger" :icon="'Delete'" @click="remove(selected)">
-              删除
-            </el-button>
+            <template v-if="canWrite">
+              <el-button size="small" plain :icon="'MagicStick'" @click="openRewrite">
+                AI 改写
+              </el-button>
+              <el-button size="small" plain :icon="'Edit'" @click="openEdit(selected)">
+                编辑
+              </el-button>
+              <el-button size="small" plain type="danger" :icon="'Delete'" @click="remove(selected)">
+                删除
+              </el-button>
+            </template>
           </div>
         </div>
       </template>

@@ -11,14 +11,15 @@ export function escapeHtml(text: string): string {
     .replace(/'/g, '&#39;')
 }
 
-function renderInline(text: string): string {
+function renderInline(text: string, lazyImages: boolean): string {
   const escaped = escapeHtml(text)
   // 行内代码先转换，避免加粗规则误伤代码内容。
   const withCode = escaped.replace(/`([^`]+)`/g, '<code>$1</code>')
   // 图片语法：src 只会是前端生成的 blob: URL 或后端返回的资产地址，均先经过整体转义。
   const withImages = withCode.replace(
     /!\[([^\]]*)\]\(([^)]+)\)/g,
-    '<img class="md-image" src="$2" alt="$1" loading="lazy">',
+    (_whole, alt: string, src: string) =>
+      `<img class="md-image" src="${src}" alt="${alt}"${lazyImages ? ' loading="lazy"' : ''}>`,
   )
   return withImages.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
 }
@@ -38,16 +39,22 @@ function isSeparatorCell(cell: string): boolean {
   return /^:?-{3,}:?$/.test(cell)
 }
 
-function renderTable(rows: string[][]): string {
+function renderTable(rows: string[][], lazyImages: boolean): string {
   const columns = Math.max(...rows.map((row) => row.length))
   const buildRow = (row: string[], tag: 'th' | 'td') =>
-    `<tr>${Array.from({ length: columns }, (_, i) => `<${tag}>${renderInline(row[i] ?? '')}</${tag}>`).join('')}</tr>`
+    `<tr>${Array.from({ length: columns }, (_, i) => `<${tag}>${renderInline(row[i] ?? '', lazyImages)}</${tag}>`).join('')}</tr>`
   const [head, ...body] = rows
   return `<table><thead>${buildRow(head, 'th')}</thead><tbody>${body.map((row) => buildRow(row, 'td')).join('')}</tbody></table>`
 }
 
-export function renderMarkdown(source: string, headingShift = 2): string {
+// 图片默认懒加载；抽屉/折叠面板里原生懒加载可能不触发，切块预览传 lazyImages: false。
+export function renderMarkdown(
+  source: string,
+  headingShift = 2,
+  options: { lazyImages?: boolean } = {},
+): string {
   const lines = source.replace(/\r\n/g, '\n').split('\n')
+  const lazyImages = options.lazyImages ?? true
   const output: string[] = []
   let paragraph: string[] = []
   let list: { ordered: boolean; items: string[] } | null = null
@@ -55,14 +62,14 @@ export function renderMarkdown(source: string, headingShift = 2): string {
 
   const flushParagraph = () => {
     if (paragraph.length > 0) {
-      output.push(`<p>${paragraph.map(renderInline).join('<br>')}</p>`)
+      output.push(`<p>${paragraph.map((p) => renderInline(p, lazyImages)).join('<br>')}</p>`)
       paragraph = []
     }
   }
   const flushList = () => {
     if (list && list.items.length > 0) {
       const tag = list.ordered ? 'ol' : 'ul'
-      output.push(`<${tag}>${list.items.map((item) => `<li>${renderInline(item)}</li>`).join('')}</${tag}>`)
+      output.push(`<${tag}>${list.items.map((item) => `<li>${renderInline(item, lazyImages)}</li>`).join('')}</${tag}>`)
       list = null
     }
   }
@@ -71,10 +78,10 @@ export function renderMarkdown(source: string, headingShift = 2): string {
       // 第二行是 |---|---| 分隔行则为标准 markdown 表格，否则按管道行格式（首行即表头）。
       const separator = table[1].every(isSeparatorCell)
       const rows = separator ? [table[0], ...table.slice(2)] : table
-      if (rows.length >= 2) output.push(renderTable(rows))
-      else output.push(`<p>${table.map((row) => renderInline(row.join(' | '))).join('<br>')}</p>`)
+      if (rows.length >= 2) output.push(renderTable(rows, lazyImages))
+      else output.push(`<p>${table.map((row) => renderInline(row.join(' | '), lazyImages)).join('<br>')}</p>`)
     } else if (table.length === 1) {
-      output.push(`<p>${renderInline(table[0].join(' | '))}</p>`)
+      output.push(`<p>${renderInline(table[0].join(' | '), lazyImages)}</p>`)
     }
     table = []
   }
@@ -93,7 +100,7 @@ export function renderMarkdown(source: string, headingShift = 2): string {
       flushParagraph()
       flushList()
       const level = Math.min(6, heading[1].length + headingShift)
-      output.push(`<h${level}>${renderInline(heading[2].trim())}</h${level}>`)
+      output.push(`<h${level}>${renderInline(heading[2].trim(), lazyImages)}</h${level}>`)
       continue
     }
     const bullet = line.match(/^\s*[-*]\s+(.+)$/)

@@ -4,7 +4,7 @@ from hashlib import sha256
 from secrets import token_urlsafe
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from knowledge_service.domain.errors import AdminCredentialNotFound
@@ -28,14 +28,42 @@ async def list_admin_credentials(session: AsyncSession) -> list[AdminCredential]
 
 
 async def create_admin_credential(
-    session: AsyncSession, *, name: str
+    session: AsyncSession, *, name: str, role: str = "admin"
 ) -> tuple[AdminCredential, str]:
     """创建管理员凭据；返回凭据与一次性明文 Token。"""
     token = f"ka_{token_urlsafe(32)}"
-    credential = AdminCredential(name=name, token_hash=hash_admin_token(token))
+    credential = AdminCredential(name=name, role=role, token_hash=hash_admin_token(token))
     session.add(credential)
     await session.flush()
     return credential, token
+
+
+async def update_admin_credential(
+    session: AsyncSession,
+    *,
+    admin_credential_id: UUID,
+    role: str | None = None,
+    is_enabled: bool | None = None,
+) -> AdminCredential:
+    """按需修改角色与启停状态，返回最新凭据。"""
+    credential = await get_admin_credential(session, admin_credential_id=admin_credential_id)
+    if role is not None:
+        credential.role = role
+    if is_enabled is not None:
+        credential.is_enabled = is_enabled
+    await session.flush()
+    return credential
+
+
+async def count_enabled_admins(session: AsyncSession, *, exclude_id: UUID | None = None) -> int:
+    """统计启用中的 admin 角色凭据数量，用于防止撤空管理员。"""
+    statement = select(func.count(AdminCredential.id)).where(
+        AdminCredential.role == "admin",
+        AdminCredential.is_enabled.is_(True),
+    )
+    if exclude_id is not None:
+        statement = statement.where(AdminCredential.id != exclude_id)
+    return int(await session.scalar(statement) or 0)
 
 
 async def get_admin_credential(
@@ -47,13 +75,9 @@ async def get_admin_credential(
     return credential
 
 
-async def reset_admin_credential(
-    session: AsyncSession, *, admin_credential_id: UUID
-) -> str:
+async def reset_admin_credential(session: AsyncSession, *, admin_credential_id: UUID) -> str:
     """替换凭据并启用；旧 Token 对新请求立即失效，新明文仅本次返回。"""
-    credential = await get_admin_credential(
-        session, admin_credential_id=admin_credential_id
-    )
+    credential = await get_admin_credential(session, admin_credential_id=admin_credential_id)
     token = f"ka_{token_urlsafe(32)}"
     credential.token_hash = hash_admin_token(token)
     credential.is_enabled = True
@@ -64,18 +88,12 @@ async def reset_admin_credential(
 async def set_admin_credential_enabled(
     session: AsyncSession, *, admin_credential_id: UUID, is_enabled: bool
 ) -> None:
-    credential = await get_admin_credential(
-        session, admin_credential_id=admin_credential_id
-    )
+    credential = await get_admin_credential(session, admin_credential_id=admin_credential_id)
     credential.is_enabled = is_enabled
     await session.flush()
 
 
-async def delete_admin_credential(
-    session: AsyncSession, *, admin_credential_id: UUID
-) -> None:
-    credential = await get_admin_credential(
-        session, admin_credential_id=admin_credential_id
-    )
+async def delete_admin_credential(session: AsyncSession, *, admin_credential_id: UUID) -> None:
+    credential = await get_admin_credential(session, admin_credential_id=admin_credential_id)
     await session.delete(credential)
     await session.flush()

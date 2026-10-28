@@ -2,14 +2,22 @@
 import { onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { client, errorMessage } from '../api/client'
+import { ROLE_LABELS, type AdminRole } from '../api/session'
 
 interface AdminCredential {
   id: string
   name: string
+  role: AdminRole
   is_enabled: boolean
   created_at: string
   updated_at: string
 }
+
+const roleOptions: { value: AdminRole; label: string; hint: string }[] = [
+  { value: 'admin', label: '管理员', hint: '全部权限，含系统设置与凭据管理' },
+  { value: 'operator', label: '运营', hint: '可改业务数据，不能碰模型/提示词/凭据' },
+  { value: 'viewer', label: '只读', hint: '只能查询与问答，不能写操作' },
+]
 
 const credentials = ref<AdminCredential[]>([])
 const loading = ref(false)
@@ -17,6 +25,7 @@ const loading = ref(false)
 const createDialog = reactive({
   visible: false,
   name: '',
+  role: 'admin' as AdminRole,
   submitting: false,
 })
 
@@ -42,6 +51,7 @@ async function loadCredentials() {
 
 function openCreateDialog() {
   createDialog.name = ''
+  createDialog.role = 'admin'
   createDialog.visible = true
 }
 
@@ -54,7 +64,7 @@ async function createCredential() {
   try {
     const { data } = await client.post<{ admin_credential_id: string; token: string }>(
       '/admin/credentials',
-      { name: createDialog.name.trim() },
+      { name: createDialog.name.trim(), role: createDialog.role },
     )
     createDialog.visible = false
     ElMessage.success('管理员凭据已创建')
@@ -115,6 +125,17 @@ async function toggleEnabled(credential: AdminCredential, value: string | number
   }
 }
 
+async function changeRole(credential: AdminCredential, role: AdminRole) {
+  try {
+    await client.patch(`/admin/credentials/${credential.id}`, { role })
+    credential.role = role
+    ElMessage.success(`已改为「${ROLE_LABELS[role]}」`)
+  } catch (error) {
+    errorMessage(error, '调整角色失败')
+    await loadCredentials()
+  }
+}
+
 async function removeCredential(credential: AdminCredential) {
   try {
     await ElMessageBox.confirm(
@@ -160,6 +181,22 @@ onMounted(loadCredentials)
 
     <el-table :data="credentials" v-loading="loading" empty-text="暂无库内管理员凭据">
       <el-table-column prop="name" label="管理员标识" min-width="160" show-overflow-tooltip />
+      <el-table-column label="角色" width="132">
+        <template #default="{ row }">
+          <el-select
+            :model-value="row.role"
+            size="small"
+            @change="(role: AdminRole) => changeRole(row, role)"
+          >
+            <el-option
+              v-for="option in roleOptions"
+              :key="option.value"
+              :label="option.label"
+              :value="option.value"
+            />
+          </el-select>
+        </template>
+      </el-table-column>
       <el-table-column label="状态" width="90">
         <template #default="{ row }">
           <el-tag v-if="row.is_enabled" type="success" size="small">启用</el-tag>
@@ -198,6 +235,19 @@ onMounted(loadCredentials)
       <el-form label-width="90px">
         <el-form-item label="管理员标识" required>
           <el-input v-model="createDialog.name" maxlength="120" placeholder="例如 张三 / 值班账号" />
+        </el-form-item>
+        <el-form-item label="角色">
+          <el-select v-model="createDialog.role" style="width: 100%">
+            <el-option
+              v-for="option in roleOptions"
+              :key="option.value"
+              :label="option.label"
+              :value="option.value"
+            />
+          </el-select>
+          <div class="role-hint">
+            {{ roleOptions.find((option) => option.value === createDialog.role)?.hint }}
+          </div>
         </el-form-item>
       </el-form>
       <template #footer>
@@ -248,6 +298,12 @@ onMounted(loadCredentials)
 }
 .tip {
   margin-bottom: 12px;
+}
+.role-hint {
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--el-text-color-secondary);
 }
 .token-alert {
   margin-bottom: 12px;

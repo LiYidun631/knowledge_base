@@ -20,7 +20,8 @@ export const client = axios.create({ baseURL: '/api/v1' })
 
 client.interceptors.request.use((config) => {
   const token = getToken()
-  if (token) config.headers.Authorization = `Bearer ${token}`
+  // 登录校验会显式传 Token，不能被 localStorage 里的旧凭据覆盖。
+  if (token && !config.headers.Authorization) config.headers.Authorization = `Bearer ${token}`
   return config
 })
 
@@ -33,7 +34,7 @@ export function handleAuthStatus(status: number): void {
     ElMessage.error('管理员 Token 无效，请重新输入')
     unauthorizedHandler?.()
   } else if (status === 403) {
-    ElMessage.error('该操作需要管理员凭据')
+    ElMessage.error('权限不足：该操作需要更高的角色')
   }
 }
 

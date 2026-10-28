@@ -27,6 +27,11 @@ const loading = ref(false)
 
 const activeCompanies = computed(() => companies.value.filter((c) => c.status === 'active'))
 
+// 全局搜索命中 FAQ 时带 q 跳转，进入后由 FaqPanel 预填搜索词。
+const faqQuery = computed(() =>
+  typeof route.query.q === 'string' && route.query.q ? route.query.q : undefined,
+)
+
 const activeKbs = computed(() =>
   kbs.value.filter((kb) => kb.company_id === companyId.value && kb.status === 'active'),
 )
@@ -99,7 +104,7 @@ onMounted(async () => {
       </div>
     </template>
 
-    <FaqPanel :key="kbId || 'empty'" :kb-id="kbId">
+    <FaqPanel :key="kbId || 'empty'" :kb-id="kbId" :initial-query="faqQuery">
       <template #toolbar>
         <el-select
           v-model="companyId"

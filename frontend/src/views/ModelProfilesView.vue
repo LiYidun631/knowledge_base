@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
+import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { client, errorMessage } from '../api/client'
 
@@ -139,13 +140,36 @@ interface ProfileForm {
   extraSettings: Record<string, unknown>
 }
 
-const activeTab = ref('usage')
+interface ModelPrice {
+  id: string
+  model_name: string
+  provider: string | null
+  input_price_per_million: number
+  output_price_per_million: number
+  updated_at: string
+}
+
+const route = useRoute()
+const activeTab = ref(route.query.tab === 'prices' ? 'prices' : 'usage')
 const presets = ref<ModelPreset[]>([])
 const profiles = ref<ModelProfile[]>([])
 const usageSlots = ref<ModelUsageSlot[]>([])
 const loading = ref(false)
 const usageLoading = ref(false)
 const presetLoading = ref(false)
+
+const prices = ref<ModelPrice[]>([])
+const priceLoading = ref(false)
+const priceDialogVisible = ref(false)
+const priceSubmitting = ref(false)
+// 记录编辑前的模型名：模型名是核算主键，改名等于新增，因此编辑时锁定。
+const priceEditingName = ref<string | null>(null)
+const priceForm = reactive({
+  model_name: '',
+  provider: '',
+  input_price: '',
+  output_price: '',
+})
 
 const dialogVisible = ref(false)
 const editingId = ref<string | null>(null)
@@ -247,8 +271,121 @@ async function loadUsage() {
   }
 }
 
+async function loadPrices() {
+  priceLoading.value = true
+  try {
+    prices.value = (await client.get('/admin/model-prices')).data
+  } catch (error) {
+    errorMessage(error, '加载计费单价失败')
+  } finally {
+    priceLoading.value = false
+  }
+}
+
 async function refreshAll() {
-  await Promise.all([loadProfiles(), loadUsage()])
+  await Promise.all([loadProfiles(), loadUsage(), loadPrices()])
+}
+
+// 当前生成链路实际用到的模型里还没配单价的，给出快捷添加入口。
+const unpricedChatModels = computed(() => {
+  const seen = new Set(prices.value.map((price) => price.model_name))
+  const items: ModelUsageItem[] = []
+  const slot = usageSlots.value.find((item) => item.key === 'chat')
+  for (const item of slot?.items ?? []) {
+    if (!item.model_name.trim() || seen.has(item.model_name)) continue
+    seen.add(item.model_name)
+    items.push(item)
+  }
+  return items
+})
+
+function formatPrice(value: number): string {
+  return Number(value.toFixed(6)).toString()
+}
+
+function formatTime(value: string): string {
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value
+  return date.toLocaleString('zh-CN', { hour12: false })
+}
+
+function openPriceCreate(modelName = '', provider = '') {
+  priceEditingName.value = null
+  Object.assign(priceForm, {
+    model_name: modelName,
+    provider,
+    input_price: '',
+    output_price: '',
+  })
+  priceDialogVisible.value = true
+}
+
+function openPriceEdit(price: ModelPrice) {
+  priceEditingName.value = price.model_name
+  Object.assign(priceForm, {
+    model_name: price.model_name,
+    provider: price.provider ?? '',
+    input_price: formatPrice(price.input_price_per_million),
+    output_price: formatPrice(price.output_price_per_million),
+  })
+  priceDialogVisible.value = true
+}
+
+function parsePrice(value: string): number | null {
+  const trimmed = value.trim()
+  if (!trimmed) return null
+  const parsed = Number(trimmed)
+  if (!Number.isFinite(parsed) || parsed < 0) return null
+  return Math.round(parsed * 1_000_000) / 1_000_000
+}
+
+async function submitPrice() {
+  const modelName = priceForm.model_name.trim()
+  if (!modelName) {
+    ElMessage.warning('请填写模型名')
+    return
+  }
+  const input = parsePrice(priceForm.input_price)
+  const output = parsePrice(priceForm.output_price)
+  if (input == null || output == null) {
+    ElMessage.warning('单价需为不小于 0 的数字，最多 6 位小数')
+    return
+  }
+  priceSubmitting.value = true
+  try {
+    await client.put('/admin/model-prices', {
+      model_name: modelName,
+      provider: priceForm.provider.trim() || null,
+      input_price_per_million: input,
+      output_price_per_million: output,
+    })
+    ElMessage.success('单价已保存')
+    priceDialogVisible.value = false
+    await loadPrices()
+  } catch (error) {
+    errorMessage(error, '保存单价失败')
+  } finally {
+    priceSubmitting.value = false
+  }
+}
+
+async function deletePrice(price: ModelPrice) {
+  try {
+    await ElMessageBox.confirm(
+      `删除「${price.model_name}」的单价后，该模型在仪表盘中不再计入成本金额。`,
+      '删除单价',
+      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' },
+    )
+  } catch {
+    return
+  }
+  try {
+    await client.delete(`/admin/model-prices/${price.id}`)
+    ElMessage.success('已删除')
+    await loadPrices()
+  } catch (error) {
+    errorMessage(error, '删除失败')
+  }
 }
 
 function kindUsage(kind: string): string {
@@ -824,6 +961,51 @@ onMounted(() => {
           <el-table-column prop="note" label="说明" min-width="180" />
         </el-table>
       </el-tab-pane>
+
+      <el-tab-pane label="计费单价" name="prices">
+        <p class="usage-head">
+          按模型名配置输入/输出 token 单价（元 / 百万 tokens），仪表盘据此核算问答成本；
+          只统计生成阶段，FAQ 直出、未记录 token 的记录以及 embedding / OCR 调用不计费。
+        </p>
+        <div class="toolbar price-toolbar">
+          <el-button type="primary" @click="openPriceCreate()">新增单价</el-button>
+          <div v-if="unpricedChatModels.length" class="price-suggest">
+            <span class="price-suggest-label">当前生成模型未定价：</span>
+            <el-button
+              v-for="item in unpricedChatModels"
+              :key="item.model_name"
+              size="small"
+              @click="openPriceCreate(item.model_name, item.provider)"
+            >
+              {{ item.model_name }}
+            </el-button>
+          </div>
+        </div>
+        <el-table v-loading="priceLoading" :data="prices" border>
+          <el-table-column prop="model_name" label="模型名" min-width="200" />
+          <el-table-column label="供应商" width="140">
+            <template #default="{ row }">{{ row.provider || '—' }}</template>
+          </el-table-column>
+          <el-table-column label="输入单价（元/百万）" width="180" align="right">
+            <template #default="{ row }">{{ formatPrice(row.input_price_per_million) }}</template>
+          </el-table-column>
+          <el-table-column label="输出单价（元/百万）" width="180" align="right">
+            <template #default="{ row }">{{ formatPrice(row.output_price_per_million) }}</template>
+          </el-table-column>
+          <el-table-column label="更新时间" width="170">
+            <template #default="{ row }">{{ formatTime(row.updated_at) }}</template>
+          </el-table-column>
+          <el-table-column label="操作" width="130">
+            <template #default="{ row }">
+              <el-button link type="primary" size="small" @click="openPriceEdit(row)">编辑</el-button>
+              <el-button link type="danger" size="small" @click="deletePrice(row)">删除</el-button>
+            </template>
+          </el-table-column>
+        </el-table>
+        <div v-if="!priceLoading && !prices.length" class="usage-empty">
+          尚未配置任何模型单价，仪表盘成本核算会显示为 0。
+        </div>
+      </el-tab-pane>
     </el-tabs>
 
     <el-dialog
@@ -969,6 +1151,37 @@ onMounted(() => {
         <el-button type="primary" :loading="keySubmitting" @click="submitApiKey">保存</el-button>
       </template>
     </el-dialog>
+    <el-dialog
+      v-model="priceDialogVisible"
+      :title="priceEditingName ? '编辑计费单价' : '新增计费单价'"
+      width="480px"
+    >
+      <el-form label-width="96px">
+        <el-form-item label="模型名" required>
+          <el-input
+            v-model="priceForm.model_name"
+            :disabled="Boolean(priceEditingName)"
+            placeholder="与问答记录中的生成模型名一致"
+          />
+        </el-form-item>
+        <el-form-item label="供应商">
+          <el-input v-model="priceForm.provider" placeholder="仅用于展示，可留空" />
+        </el-form-item>
+        <el-form-item label="输入单价" required>
+          <el-input v-model="priceForm.input_price" placeholder="元/百万 tokens，如 0.15" />
+        </el-form-item>
+        <el-form-item label="输出单价" required>
+          <el-input v-model="priceForm.output_price" placeholder="元/百万 tokens，如 0.6" />
+        </el-form-item>
+      </el-form>
+      <p class="key-hint">
+        单价按当前配置实时核算：调整后历史问答的金额会一起变化。模型名是核算主键，改名请新增后删除旧条目。
+      </p>
+      <template #footer>
+        <el-button @click="priceDialogVisible = false">取消</el-button>
+        <el-button type="primary" :loading="priceSubmitting" @click="submitPrice">保存</el-button>
+      </template>
+    </el-dialog>
   </el-card>
 </template>
 
@@ -989,6 +1202,23 @@ onMounted(() => {
 }
 .toolbar {
   margin-bottom: 12px;
+}
+/* 新增按钮与未定价模型快捷入口保持单行，窄屏时让快捷项自行换行。 */
+.price-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.price-suggest {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.price-suggest-label {
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
 }
 .usage-head {
   margin: 0 0 8px;

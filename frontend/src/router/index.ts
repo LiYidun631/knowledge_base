@@ -1,4 +1,5 @@
 import { createRouter, createWebHashHistory } from 'vue-router'
+import { adminIdentity } from '../api/session'
 
 const CHUNK_TARGET_KEY = 'kb-admin:chunk-reload-to'
 
@@ -20,6 +21,18 @@ const router = createRouter({
       name: 'dashboard',
       component: () => import('../views/DashboardView.vue'),
       meta: { group: '工作台', title: '统计概览' },
+    },
+    {
+      path: '/search',
+      name: 'search',
+      component: () => import('../views/SearchView.vue'),
+      meta: { group: '工作台', title: '全局搜索' },
+    },
+    {
+      path: '/tasks',
+      name: 'tasks',
+      component: () => import('../views/TasksView.vue'),
+      meta: { group: '工作台', title: '任务中心' },
     },
     {
       path: '/kbs',
@@ -52,6 +65,12 @@ const router = createRouter({
       meta: { group: '问答运营', title: '问答记录' },
     },
     {
+      path: '/evaluation',
+      name: 'evaluation',
+      component: () => import('../views/EvaluationView.vue'),
+      meta: { group: '问答运营', title: '检索评测' },
+    },
+    {
       path: '/project-traces',
       name: 'project-traces',
       component: () => import('../views/ProjectTracesView.vue'),
@@ -67,13 +86,13 @@ const router = createRouter({
       path: '/prompts',
       name: 'prompts',
       component: () => import('../views/PromptsView.vue'),
-      meta: { group: '系统设置', title: '提示词管理' },
+      meta: { group: '系统设置', title: '提示词管理', role: 'admin' },
     },
     {
       path: '/models',
       name: 'models',
       component: () => import('../views/ModelProfilesView.vue'),
-      meta: { group: '系统设置', title: '模型管理' },
+      meta: { group: '系统设置', title: '模型管理', role: 'admin' },
     },
     {
       path: '/companies',
@@ -85,9 +104,24 @@ const router = createRouter({
       path: '/admins',
       name: 'admins',
       component: () => import('../views/AdminCredentialsView.vue'),
-      meta: { group: '系统设置', title: '管理员' },
+      meta: { group: '系统设置', title: '管理员', role: 'admin' },
+    },
+    {
+      path: '/audit',
+      name: 'audit',
+      component: () => import('../views/AuditLogsView.vue'),
+      meta: { group: '系统设置', title: '审计日志', role: 'admin' },
     },
   ],
+})
+
+// 管理员专属页面：运营/只读即使手输地址也退回概览（后端同时会 403 兜底）。
+router.beforeEach((to) => {
+  const me = adminIdentity.value
+  if (to.meta.role === 'admin' && me && me.role !== 'admin') {
+    return { path: '/dashboard' }
+  }
+  return true
 })
 
 // 重新构建会删除旧的路由 chunk，旧标签页点菜单时动态导入 404，导航会静默失败。

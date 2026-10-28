@@ -1,15 +1,17 @@
 # 知识库接口文档
 
-版本：v0.11
-更新日期：2026-10-23
+版本：v0.13
+更新日期：2026-10-28
 
 知识库 API 支持两种运行方式：独立运行 `knowledge_base` 时，代码默认地址为 `http://127.0.0.1:8000/api/v1`，当前本机及 `.env.example` 配置为 `http://127.0.0.1:8333/api/v1`；嵌入宿主时使用宿主的监听地址和 `/api/v1` 前缀。
 
 独立入口 `main.py` 挂载 `require_service_auth`，业务请求必须携带 `Authorization: Bearer <Token>`；健康检查公开。服务端环境配置 `KNOWLEDGE_SERVICE_AUTH_ADMIN_TOKEN`（`auth_admin_token: SecretStr`）必须非空，否则业务请求返回 `503`，即使数据库中已有公司凭据也不例外，不是关闭鉴权。
 
-- 有效管理员 Token 可跨公司管理；创建公司 `POST /companies`、旧版 `POST /knowledge-bases` 及公司凭据签发/重置/停用接口仅限管理员。管理员 Token 有两个来源：`.env` 的 `KNOWLEDGE_SERVICE_AUTH_ADMIN_TOKEN`（引导 Token，始终有效，作为遗忘凭据时的兜底入口）和库内 `admin_credentials` 表（管理员 API 签发，见「管理员凭据（多管理员）」）。有效公司 Token 调用仅管理员接口返回 `403`；无效 Token 返回 `401`。
+- 有效管理员 Token 可跨公司管理；创建公司 `POST /companies` 与旧版 `POST /knowledge-bases` 需 `admin` 或 `operator` 角色（`viewer` 返回 `403`），公司凭据签发/重置/停用接口仅限 `admin`。管理员 Token 有两个来源：`.env` 的 `KNOWLEDGE_SERVICE_AUTH_ADMIN_TOKEN`（引导 Token，始终有效，作为遗忘凭据时的兜底入口）和库内 `admin_credentials` 表（管理员 API 签发，见「管理员凭据（多管理员）」）。有效公司 Token 调用仅管理员接口返回 `403`；无效 Token 返回 `401`。
+- 库内管理员凭据分三档角色：`admin` 全权、`operator` 运营（可读写业务数据，不能管理凭据、模型档案/单价、提示词与审计）、`viewer` 只读（只允许 GET，问答与检索 POST 仍可用）。`.env` 引导 Token 固定按 `admin`。管理员专属资源（`/admin/credentials*`、`/companies/{company_id}/tokens*`、`/admin/model-profiles*`、`/admin/model-prices*`、`/admin/prompts*`、`/admin/audit-logs*`）对非 `admin` 角色一律返回 `403`。
+- 管理端写操作（POST/PUT/PATCH/DELETE）在响应后写入 `audit_logs`，记录操作者名称与角色快照、方法、路径、状态码、耗时和客户端 IP，不保存请求体；日志保留 180 天，服务启动时清理更早记录。
 - 公司 Token 只允许操作状态为 `active` 的本公司全部子库、文档、图片、QA 记录及公司大库，不提供子库级权限。缺失、无效、停用或被替换的 Token 返回 `401`；归档公司旧有效凭据返回 `403`。显式 `company_id` 与凭证不匹配返回 `403`，跨公司资源 ID 返回 `404`；UUID 无效返回 `422`。
-- 公司 Token 由管理员 API 签发，同一公司可签发多枚、按项目命名并独立重置或停用；服务端每请求查 `company_credentials` 的 SHA-256 哈希与启用状态，无鉴权缓存。多枚凭据只对应多个项目的接入身份，**权限仍以公司为边界，不做项目级数据隔离**。重置/停用对后续新请求立即生效，无需重启服务端，不中断已在途请求。普通公司 Token 不得签发、重置或停用本公司或其他公司的凭据。`test_agent` 只填 API 签发的对应公司 Token，严禁填管理员 Token。
+- 公司 Token 由管理员 API 签发，同一公司可签发多枚、按项目命名并独立重置或停用；服务端每请求查 `company_credentials` 的 SHA-256 哈希与启用状态，无鉴权缓存。多枚凭据只对应多个项目的接入身份，**权限仍以公司为边界，不做项目级数据隔离**。重置/停用对后续新请求立即生效，无需重启服务端，不中断已在途请求。普通公司 Token 不得签发、重置或停用本公司或其他公司的凭据。`health_manager_ai` 只填 API 签发的对应公司 Token，严禁填管理员 Token。
 - 旧环境映射 `KNOWLEDGE_SERVICE_AUTH_COMPANY_TOKENS` 已彻底不再支持。迁移 `0014_company_credentials`（父版本 `0013_document_asset_markers`）只建空表，不自动生成已有公司凭据，也不导入旧映射；管理员须重新签发。迁移 `0025_multi_company_credentials` 把单凭据表升级为多凭据表，已有凭据原地保留为「默认凭据」，旧 Token 继续有效。真实数据库迁移及实际 `.env` 更新仍待核对目标与备份，不代表已执行。
 
 嵌入入口 `include_knowledge_module` 的普通业务路由仍由宿主提供鉴权；**公司凭据签发/重置/停用 API 是例外，始终要求管理员 Bearer**，不能通过宿主 `AUTH_ENABLED=false` 绕过。凭据数量按项目划分，但数据权限不随凭据分项目。
@@ -20,11 +22,13 @@
 
 ## 接口一览
 
+权限标注：`仅 admin` = 只有管理员角色可调用；`admin/operator` = 运营可读可写，只读角色调用写方法返回 `403`；`任意角色可读` = 三种管理端角色都可读。公司 Token 调用管理端接口返回 `403`。
+
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | GET | `/health` | 知识库模块健康检查（公开） |
-| POST | `/companies` | 创建公司租户（仅管理员） |
-| GET | `/companies` | 列出全部公司（仅管理员，含已归档，含 `credential_count`/`active_credential_count`，供管理端列表使用） |
+| POST | `/companies` | 创建公司租户（admin/operator） |
+| GET | `/companies` | 列出全部公司（任意角色可读，含已归档，含 `credential_count`/`active_credential_count`，供管理端列表使用） |
 | GET | `/companies/{company_id}/tokens` | 列出公司全部凭据，含已停用，不含哈希或明文（仅管理员） |
 | POST | `/companies/{company_id}/tokens` | 按项目名签发新公司 Token（仅管理员，体 `{"name": ...}`，201） |
 | POST | `/companies/{company_id}/tokens/{credential_id}/reset` | 重置指定凭据并启用，旧 Token 立即失效（仅管理员，200） |
@@ -36,8 +40,8 @@
 | DELETE | `/companies/{company_id}/vector-library` | 删除空的公司级向量大库 |
 | DELETE | `/companies/{company_id}/vector-library/knowledge-bases/{knowledge_base_id}` | 删除单个子库及其知识库索引 |
 | POST | `/companies/{company_id}/vector-library/knowledge-bases/batch-delete` | 批量删除子库及其知识库索引 |
-| GET | `/admin/model-presets` | 代码内置厂商预设（仅管理员） |
-| GET | `/admin/model-usage` | 按调用位置汇总实际使用的模型与知识库范围，含环境 OCR/Chat（仅管理员） |
+| GET | `/admin/model-presets` | 代码内置厂商预设（任意角色可读） |
+| GET | `/admin/model-usage` | 按调用位置汇总实际使用的模型与知识库范围，含环境 OCR/Chat（任意角色可读） |
 | GET | `/admin/model-profiles?kind=embedding\|rerank\|chat\|ocr` | 列出模型档案，密钥只返回是否已配置（仅管理员） |
 | POST | `/admin/model-profiles` | 新增模型档案（仅管理员，201） |
 | GET | `/admin/model-profiles/{model_profile_id}` | 查询模型档案详情（仅管理员） |
@@ -48,17 +52,23 @@
 | PUT | `/admin/model-profiles/{model_profile_id}/api-key` | 写入厂商 API Key，加密入库且不回读（仅管理员，204） |
 | DELETE | `/admin/model-profiles/{model_profile_id}/api-key` | 清除已存 API Key（仅管理员，204） |
 | POST | `/admin/model-profiles/{model_profile_id}/test` | 发起一次真实调用测试连通性；失败仍返回 200 与 `ok=false`（仅管理员） |
+| GET | `/admin/model-prices` | 列出已配置的生成模型 token 单价（仅管理员） |
+| PUT | `/admin/model-prices` | 按模型名新增或覆盖 token 单价，返回最新记录（仅管理员） |
+| DELETE | `/admin/model-prices/{model_price_id}` | 删除模型单价（仅管理员，204；不存在 404） |
 | GET | `/admin/credentials` | 列出库内管理员凭据，不返回哈希或明文（仅管理员） |
-| POST | `/admin/credentials` | 创建管理员凭据，明文 Token 仅本次返回（仅管理员，201） |
+| POST | `/admin/credentials` | 创建管理员凭据，可指定 `role`，明文 Token 仅本次返回（仅管理员，201） |
 | POST | `/admin/credentials/{admin_credential_id}/reset` | 重置管理员 Token 并启用（仅管理员，200） |
-| PATCH | `/admin/credentials/{admin_credential_id}` | 启停管理员凭据（仅管理员，200） |
+| PATCH | `/admin/credentials/{admin_credential_id}` | 调整角色或启停管理员凭据（仅管理员，200） |
 | DELETE | `/admin/credentials/{admin_credential_id}` | 删除管理员凭据（仅管理员，204） |
+| GET | `/admin/me` | 当前管理员身份、角色与是否环境引导 Token（任意有效管理员侧 Token） |
+| GET | `/admin/audit-logs?actor_name=&method=&path=&start_time=&end_time=` | 管理端写操作审计分页（仅 `admin`） |
+| GET | `/admin/audit-logs/export` | 按同款筛选导出审计 CSV，单次上限 5 万条（仅 `admin`） |
 | GET | `/product-catalog?q=...&product_name=...` | 查询全局产品目录（管理员或有效公司 Token） |
-| POST | `/product-catalog` | 新增产品名称与型号组合（仅管理员，201） |
-| PUT | `/product-catalog/{catalog_id}` | 修改目录条目并级联更新文档标签（仅管理员） |
-| POST | `/product-catalog/batch-delete` | 批量删除目录条目（仅管理员） |
-| DELETE | `/product-catalog/{catalog_id}` | 删除目录条目（仅管理员，204） |
-| POST | `/knowledge-bases` | **旧版兼容接口（Deprecated，仅管理员）**；新项目请使用公司大库/子库接口 |
+| POST | `/product-catalog` | 新增产品名称与型号组合（admin/operator，201） |
+| PUT | `/product-catalog/{catalog_id}` | 修改目录条目并级联更新文档标签（admin/operator） |
+| POST | `/product-catalog/batch-delete` | 批量删除目录条目（admin/operator） |
+| DELETE | `/product-catalog/{catalog_id}` | 删除目录条目（admin/operator，204） |
+| POST | `/knowledge-bases` | **旧版兼容接口（Deprecated，admin/operator）**；新项目请使用公司大库/子库接口 |
 | GET | `/knowledge-bases?company_id=...` | 按公司分页列出 active 知识库 |
 | GET | `/knowledge-bases/{knowledge_base_id}` | 查询知识库详情 |
 | PATCH | `/knowledge-bases/{knowledge_base_id}` | 修改名称、说明或子库分块参数（只影响新入库文档） |
@@ -69,8 +79,29 @@
 | POST | `/knowledge-bases/{knowledge_base_id}/ask` | 检索知识库并调用聊天模型生成答案 |
 | GET | `/knowledge-bases/{knowledge_base_id}/qa-records?company_id=...` | 分页查询在线问答记录 |
 | GET | `/qa-records/{qa_record_id}?company_id=...` | 查询问答详情、来源快照和阶段日志 |
-| GET | `/admin/qa-records?faq_matched=true` | 管理员跨公司分页查询问答记录；可按 `faq_matched` 筛选 FAQ 直出 |
-| GET | `/admin/knowledge-bases/{knowledge_base_id}/faqs` | 分页查询 FAQ；支持 `scope=all\|kb\|document`、`document_id`、`source`、`q` 搜索 |
+| GET | `/admin/qa-records?faq_matched=true` | 管理员跨公司分页查询问答记录；可按 `faq_matched`、`review_status`、`feedback` 筛选 |
+| GET | `/admin/qa-records/export?status=failed` | 按列表同款筛选导出 CSV（不含答案正文，单次上限 5 万条；任意角色可读） |
+| PUT | `/qa-records/{qa_record_id}/feedback?company_id=...` | 提交或撤销问答反馈（`up`/`down`/`null`）；点踩自动转入待补资料 |
+| PATCH | `/admin/qa-records/{qa_record_id}/review` | 标记问答已补充资料（`resolved`）或重新打开复核（`none`） |
+| PUT | `/knowledge-bases/{kb_id}/project-traces/{external_request_id}/feedback?company_id=...` | 外部项目回传终端用户反馈；需 `X-Project-Key` |
+| PATCH | `/admin/project-traces/{trace_id}/review` | 标记项目轨迹已处理或重新打开复核 |
+| GET | `/admin/statistics?start=&end=` | 统计仪表盘聚合：总量、状态分布、token 用量、窗口内趋势与耗时 P50/P90、失败率、按模型/知识库分组（任意角色可读；窗口默认近 14 天、最长 366 天；耗时与分组不含 FAQ 直出） |
+| GET | `/admin/tasks?kind=&status=open` | 任务中心聚合：文档入库、FAQ 生成、检索评测的排队/进行中/失败/今日完成任务（任意角色可读） |
+| GET | `/admin/search?q=&limit=` | 全局搜索：跨知识库、文档、FAQ、问答记录、项目轨迹、产品目录做字面匹配，每组返回总数与前 N 条（`limit` 默认 5、上限 10；任意角色可读） |
+| GET | `/admin/evaluation-sets?company_id=&knowledge_base_id=&q=` | 列出检索评测集，含用例数量与最近一次运行（任意角色可读） |
+| POST | `/admin/evaluation-sets` | 创建评测集；同一知识库内名称唯一（admin/operator，201） |
+| GET | `/admin/evaluation-sets/{set_id}` | 查看评测集与全部用例（任意角色可读） |
+| PATCH | `/admin/evaluation-sets/{set_id}` | 修改评测集名称或说明（admin/operator） |
+| DELETE | `/admin/evaluation-sets/{set_id}` | 删除评测集及其用例、运行记录（admin/operator，204） |
+| POST | `/admin/evaluation-sets/{set_id}/cases` | 新增评测用例（admin/operator，201） |
+| POST | `/admin/evaluation-sets/{set_id}/cases/bulk` | 批量导入用例，单次最多 500 条（admin/operator，201） |
+| PATCH | `/admin/evaluation-cases/{case_id}` | 修改评测用例（admin/operator） |
+| DELETE | `/admin/evaluation-cases/{case_id}` | 删除评测用例（admin/operator，204） |
+| POST | `/admin/evaluation-sets/{set_id}/run` | 启动一次检索评测，进程内异步执行（admin/operator，202） |
+| GET | `/admin/evaluation-runs?set_id=&knowledge_base_id=&status=` | 分页查询评测运行记录（任意角色可读） |
+| GET | `/admin/evaluation-runs/{run_id}` | 运行详情：逐条用例结果与同集基线对比（任意角色可读） |
+| DELETE | `/admin/evaluation-runs/{run_id}` | 删除运行记录；运行中返回 409（admin/operator，204） |
+| GET | `/admin/knowledge-bases/{knowledge_base_id}/faqs` | 分页查询 FAQ；支持 `scope=all\|kb\|document`、`document_id`、`source`、`q` 搜索；旧版本文档级 FAQ 不返回 |
 | POST | `/admin/knowledge-bases/{knowledge_base_id}/faqs` | 新增库级或文档级 FAQ |
 | GET | `/admin/knowledge-bases/{knowledge_base_id}/faqs/random` | 随机抽取问答页推荐问题 |
 | POST | `/admin/knowledge-bases/{knowledge_base_id}/faqs/generate` | 批量补齐缺少自动 FAQ 的文档并返回入队/跳过数；归档库 409 |
@@ -81,11 +112,12 @@
 | GET | `/knowledge-bases/{knowledge_base_id}/documents` | 分页列出逻辑文档 |
 | GET | `/documents/{document_id}` | 查询文档详情 |
 | GET | `/documents/{document_id}/versions` | 查询文档版本 |
+| POST | `/documents/{document_id}/versions/{document_version_id}/activate` | 切换当前可检索版本（版本回滚）：检索、FAQ 匹配与原文件预览随之切换，最新上传版本号保持不变 |
 | GET | `/documents/{document_id}/ingestion` | 查询最新版本入库状态 |
 | POST | `/documents/{document_id}/retry` | 重试最新版本失败任务 |
 | DELETE | `/documents/{document_id}` | 删除文档的全部版本、服务端临时副本和向量 |
-| GET | `/documents/{document_id}/file?disposition=inline\|attachment` | 下载或预览最新版本原文件；inline 浏览器内预览，attachment 附件下载 |
-| GET | `/documents/{document_id}/preview` | 把最新版本转换为浏览器可内嵌内容：Office/旧版 Office/RTF/ODF → PDF，TIFF → PNG |
+| GET | `/documents/{document_id}/file?disposition=inline\|attachment` | 下载或预览当前可检索版本的原文件（尚无当前版本时回退到最新上传版本）；inline 浏览器内预览，attachment 附件下载 |
+| GET | `/documents/{document_id}/preview` | 把当前可检索版本转换为浏览器可内嵌内容：Office/旧版 Office/RTF/ODF → PDF，TIFF → PNG |
 | GET | `/document-assets/{asset_id}` | 读取检索结果中的图片资产 |
 | DELETE | `/knowledge-bases/{knowledge_base_id}/file-vectors/{file_id}?company_id=...` | 删除单个后台文件的知识库索引 |
 | POST | `/knowledge-bases/{knowledge_base_id}/file-vectors/batch-delete?company_id=...` | 批量删除后台文件的知识库索引 |
@@ -160,7 +192,7 @@ Content-Type: application/json
 
 `code` 不需要提交，由服务端自动生成；`description` 可省略或传 `null`。请保存响应中的 `id`，后续创建大库、上传文件和检索时将其作为 `company_id` 使用。创建公司不会自动签发公司 Token。
 
-#### 列出全部公司（仅管理员）
+#### 列出全部公司（任意角色可读）
 
 ```http
 GET $base/companies
@@ -257,19 +289,19 @@ Content-Type: application/json
 ```
 
 ```json
-{ "name": "值班管理员" }
+{ "name": "值班管理员", "role": "operator" }
 ```
 
-成功 `201`，响应含 `admin_credential_id` 与一次性 `token`（`ka_` + `secrets.token_urlsafe(32)`），响应头 `Cache-Control: no-store`。库内 `admin_credentials` 仅存 SHA-256 哈希与启用状态；`.env` 引导 Token 不在此列且始终有效，即使误删全部库内凭据也能恢复管理入口。
+`role` 可选，默认 `admin`，取值 `admin` / `operator` / `viewer`；非法值返回 `422`。成功 `201`，响应含 `admin_credential_id` 与一次性 `token`（`ka_` + `secrets.token_urlsafe(32)`），响应头 `Cache-Control: no-store`。库内 `admin_credentials` 仅存 SHA-256 哈希、角色与启用状态；`.env` 引导 Token 不在此列且始终有效，即使误删全部库内凭据也能恢复管理入口。
 
-重置（旧 Token 立即失效，新明文仅本次返回，`200`）：
+重置（旧 Token 立即失效，新明文仅本次返回，`200`；角色不变并强制启用）：
 
 ```http
 POST $base/admin/credentials/{admin_credential_id}/reset
 Authorization: Bearer <管理员 Token>
 ```
 
-启停（`200`，返回更新后的凭据信息）：
+修改角色或启停（`200`，返回更新后的凭据信息；两个字段都可选）：
 
 ```http
 PATCH $base/admin/credentials/{admin_credential_id}
@@ -278,7 +310,7 @@ Content-Type: application/json
 ```
 
 ```json
-{ "is_enabled": false }
+{ "role": "viewer", "is_enabled": true }
 ```
 
 删除（`204`，无响应体）：
@@ -288,7 +320,35 @@ DELETE $base/admin/credentials/{admin_credential_id}
 Authorization: Bearer <管理员 Token>
 ```
 
-服务端每个请求都重新校验库内管理员 Token 的哈希与启用状态，无鉴权缓存，重置/停用/删除对后续新请求立即生效；不存在的凭据 ID 返回 `404`，凭据标识不能为空白。
+服务端每个请求都重新校验库内管理员 Token 的哈希、角色与启用状态，无鉴权缓存，重置/停用/删除/改角色对后续新请求立即生效；不存在的凭据 ID 返回 `404`，凭据标识不能为空白。`.env` 引导 Token 存在时不限制停用库内管理员；引导 Token 为空（服务本身会返回 `503`）时，停用、删除或降级最后一名启用中的 `admin` 凭据返回 `409`。
+
+#### 角色与审计
+
+`GET $base/admin/me` 返回当前管理员侧身份，管理页据此决定菜单与写操作入口：
+
+```json
+{ "name": "值班管理员", "role": "operator", "credential_id": "…", "is_bootstrap": false }
+```
+
+角色能力（公司 Token 不适用这些角色，仍只访问本公司数据）：
+
+| 能力 | `admin` | `operator` | `viewer` |
+| --- | --- | --- | --- |
+| 业务数据读取（公司、知识库、文档、问答记录、统计、任务、评测、FAQ、项目记录） | ✓ | ✓ | ✓ |
+| 业务数据写入（建公司、上传/删除文档、FAQ 增删改、复核与反馈回流） | ✓ | ✓ | ✗ |
+| 主动问答与检索（`POST /ask`、`/ask/stream`、`/search`） | ✓ | ✓ | ✓ |
+| 管理员凭据（`/admin/credentials*`、`/companies/{id}/tokens*`） | ✓ | ✗ | ✗ |
+| 模型档案 / 计费单价 / 提示词（`/admin/model-profiles*`、`/admin/model-prices*`、`/admin/prompts*`） | ✓ | ✗ | ✗ |
+| 审计日志（`/admin/audit-logs*`） | ✓ | ✗ | ✗ |
+
+越权请求统一返回 `403`。管理端写操作在响应后异步落一条审计记录（写入失败不影响业务响应）：
+
+```http
+GET $base/admin/audit-logs?actor_name=运营&method=POST&path=/admin&start_time=2026-10-01T00:00:00Z&page=1&page_size=50
+Authorization: Bearer <admin Token>
+```
+
+返回 `{page, page_size, total, items}`；`items` 字段：`id`、`actor_name`、`actor_role`、`credential_id`（环境引导 Token 为空）、`method`、`path`（不含查询串）、`status_code`、`duration_ms`、`client_ip`、`created_at`。只记录管理端（管理员侧凭据）的 POST/PUT/PATCH/DELETE，不保存请求体，避免密钥等敏感内容落库；按操作时间倒序。`GET $base/admin/audit-logs/export` 使用相同筛选导出 CSV（UTF-8 BOM），单次上限 5 万条。日志保留 180 天，服务启动时清理更早记录。
 
 #### 创建公司级向量大库
 
@@ -372,7 +432,7 @@ Content-Type: application/json
 
 ### 3. 模型配置与管理（管理端接口）
 
-模型档案（服务商、模型名、地址、维度、密钥引用）登记在数据库 `model_profiles` 表。登记有两种途径：开发人员在 `.env` 维护默认模型和预设后运行 `uv run provision-knowledge-catalog --env`，或管理员调用下方 `/admin/model-profiles` 系列接口增删改查。所有 `/admin/*` 接口仅管理员 Token 可调用，公司 Token 一律 `403`。
+模型档案（服务商、模型名、地址、维度、密钥引用）登记在数据库 `model_profiles` 表。登记有两种途径：开发人员在 `.env` 维护默认模型和预设后运行 `uv run provision-knowledge-catalog --env`，或管理员调用下方 `/admin/model-profiles` 系列接口增删改查。所有 `/admin/*` 接口只接受管理端凭据（公司 Token 一律 `403`），其中模型档案、模型单价、提示词、管理员凭据与审计仅 `admin` 角色可调用。
 
 - `GET /admin/model-presets`：返回代码内置的厂商预设（openai_compatible、dashscope、bigmodel、volcengine、qianfan、deepseek、baidu 等），供管理页渲染服务商/模型下拉选项。每项声明该厂商支持的调用能力：`supports_embedding`/`embedding_path`、`supports_chat`/`chat_path`、`supports_rerank`/`rerank_path`/`rerank_base_url`/`known_rerank_models`、`supports_ocr`/`ocr_path`/`ocr_base_url`/`ocr_mode`/`known_ocr_models`；前端不再硬编码任何厂商地址或路径。
 - `GET /admin/model-usage`：按调用位置返回服务内部实际使用的全部模型，`slots` 依次为 `embedding`（入库向量化、在线检索向量化、FAQ 问题匹配）、`rerank`（检索候选重排）、`chat`（问答生成、FAQ 自动生成、FAQ AI 改写）、`ocr`（扫描件与图片识别）。每个条目含 `source`（`knowledge_base` 知识库绑定 / `default` 默认档案 / `environment` 环境配置）、`scope_names`（使用该模型的公司 / 子库）、`is_active` 等字段；环境模型没有 `profile_id`，不可通过档案接口编辑。响应不含任何密钥明文。
@@ -480,11 +540,14 @@ GET $base/knowledge-bases/{knowledge_base_id}/documents?offset=0&limit=50&q=说�
 ```http
 GET  $base/documents/{document_id}
 GET  $base/documents/{document_id}/versions
+POST $base/documents/{document_id}/versions/{document_version_id}/activate
 GET  $base/documents/{document_id}/ingestion
 POST $base/documents/{document_id}/retry
 ```
 
 前三个接口无请求体；`POST .../retry` 也无请求体，只能重试最新版本的失败任务。所有 `{document_id}` 都使用上传接口返回的文档 UUID。
+
+`POST .../activate` 把指定历史版本设为当前可检索版本（版本回滚）：只翻转 `is_current` 标志，切块与向量按版本存储，不重新入库。检索、FAQ 匹配、原文件预览和下载都会跟随新的当前版本，`latest_version_number`（最新上传版本号）保持不变。仅允许入库成功（`status=completed`）的版本，知识库已归档或文档有排队/运行中的入库任务时返回 `409`；重复激活已是当前版本的版本时直接返回该版本（幂等）。
 
 #### 下载文档图片资产
 
@@ -673,7 +736,7 @@ Authorization: Bearer <对应公司 Token 或管理员 Token>
 
 ### `GET /documents/{document_id}/preview`
 
-把文档最新版本转换为浏览器可直接内嵌的内容，响应体为二进制（不是 JSON），用于旧版格式的在线预览：
+把文档当前可检索版本转换为浏览器可直接内嵌的内容，响应体为二进制（不是 JSON），用于旧版格式的在线预览。尚无当前可检索版本（例如最新版本仍在入库或入库失败）时回退到最新上传版本：
 
 | 输入格式 | 输出 | 说明 |
 | --- | --- | --- |
@@ -682,7 +745,7 @@ Authorization: Bearer <对应公司 Token 或管理员 Token>
 
 其余格式（PDF、图片、TXT/LOG/JSON/XML、Markdown、CSV、HTML）不需要调用此接口，前端直接读取 `/documents/{document_id}/file?disposition=inline` 后由浏览器或客户端渲染器展示。新版 Word、Excel、PowerPoint 在管理页也优先使用客户端渲染，转换接口作为渲染失败时的兜底。
 
-转换结果按不可变的文档版本 ID 缓存在系统临时目录（`<临时目录>/knowledge-service-previews`），同一版本重复请求直接复用；升级为新版本后按新版本 ID 重新转换。错误语义：`415` 表示该格式没有服务端转换、`503` 表示缺少 LibreOffice、`422` 表示文件损坏或转换失败；前端在这些情况下仍提供原文件下载。
+转换结果按不可变的文档版本 ID 缓存在系统临时目录（`<临时目录>/knowledge-service-previews`），同一版本重复请求直接复用；切换版本（含回滚）后按目标版本 ID 重新转换。错误语义：`415` 表示该格式没有服务端转换、`503` 表示缺少 LibreOffice、`422` 表示文件损坏或转换失败；前端在这些情况下仍提供原文件下载。
 
 HTML 文件在管理页中以空 `sandbox` 属性的 iframe 渲染，脚本不会执行，也无法访问管理页同源内容。
 
@@ -706,7 +769,8 @@ curl.exe -X POST "$base/knowledge-bases/$kbId/documents?company_id=$companyId&fi
 
 - `GET /knowledge-bases/{knowledge_base_id}/documents?offset=0&limit=50`：分页查询知识库中的逻辑文档；可选 `folder_id` 只返回该目录下的文档（不传返回全部），`root_only=true` 只返回根目录文档，`q` 按文件名或文档标识模糊搜索。响应头 `X-Total-Count` 为过滤后的总数。
 - `GET /documents/{document_id}`：查询逻辑文档及最新版本状态。
-- `GET /documents/{document_id}/versions`：按版本号倒序返回历史版本；`is_current=true` 表示当前成功版本。
+- `GET /documents/{document_id}/versions`：按版本号倒序返回历史版本；`is_current=true` 表示当前可检索版本（由版本回滚切换）。原文件下载/预览跟随该版本，尚无当前版本时回退到最新上传版本。
+- `POST /documents/{document_id}/versions/{document_version_id}/activate`：版本回滚，把入库成功的历史版本设为当前可检索版本；只翻转 `is_current`，不重新入库，最新上传版本号不变。失败版本、归档知识库或存在排队/运行中入库任务时返回 `409`，版本不属于该文档返回 `404`。
 - `GET /documents/{document_id}/ingestion`：查询最新版本最近一次任务。
 - `POST /documents/{document_id}/retry`：仅可重试最新版本的失败任务，返回 `200` 表示已重新排队；知识库已归档返回 `409`。
 - `DELETE /documents/{document_id}`：兼容按知识库内部文档 UUID 删除全部版本、MySQL 分块、服务端临时副本和 Chroma 向量，成功返回 `204`。后台原文件不受影响；如果外部临时副本或向量清理暂时失败，接口返回 `500`，文档会保持 `deleting` 状态，重复调用即可继续清理。
@@ -728,7 +792,7 @@ curl.exe -X POST "$base/knowledge-bases/$kbId/documents?company_id=$companyId&fi
 产品目录独立于知识库，保存允许上传和检索的产品名称与型号组合；上传接口会校验标签必须已在目录中登记。
 
 - `GET /product-catalog?q=...&product_name=...`：管理员或任一有效公司 Token 均可读取，供外部问答客户端对齐产品/型号标签。`q` 对产品名称与型号做不区分大小写的模糊匹配，`product_name` 精确过滤；按产品名称、型号、创建时间排序返回数组。
-- 新增、修改、批量删除、单条删除仅限管理员；修改名称会级联更新引用旧标签的文档元数据。
+- 新增、修改、批量删除、单条删除需 `admin` 或 `operator` 角色；修改名称会级联更新引用旧标签的文档元数据。
 - 公司 Token 只有读权限，不能通过目录接口新增或修改条目。
 
 ### 切块预览
@@ -814,7 +878,7 @@ GET $base/documents/{document_id}/versions/{document_version_id}/chunks?limit=10
 | 204 | 公司凭据停用（含重复停用）、知识库归档、大库/子库删除或文件向量删除成功 |
 | 400 | 非鉴权请求头格式错误 |
 | 401 | Bearer Token 缺失、无效、停用或被替换；嵌入普通业务按宿主规则，凭据管理仍必须管理员 Bearer |
-| 403 | 公司凭证与显式 company_id 不符、调用仅管理员接口，或使用归档公司旧有效凭据 |
+| 403 | 公司凭证与显式 company_id 不符、调用管理员专属接口或角色越权（`operator`/`viewer` 访问仅 `admin` 资源、`viewer` 发起写请求），或使用归档公司旧有效凭据 |
 | 404 | 资源不存在、知识库已归档、资源 ID 属于其他公司；凭据签发/重置的公司未知或归档，重置/停用时无公司或凭据 |
 | 409 | 凭据已存在（含停用）时再次签发、名称冲突（含同级目录重名）、目录非空、大库仍有子库、存在运行中的入库任务、模型绑定锁定或任务不可重试 |
 | 500 | 服务端临时文件或 Chroma 清理失败；文档可重复调用删除接口重试 |
@@ -827,7 +891,7 @@ GET $base/documents/{document_id}/versions/{document_version_id}/chunks?limit=10
 
 ### `POST /knowledge-bases/{knowledge_base_id}/search?company_id={company_id}`
 
-`company_id` 是必填 UUID Query 参数，`knowledge_base_id` 放路径；此检索契约不变。`test_agent` 只按 `source` 映射调用 `/search`，不调用 `/ask`。
+`company_id` 是必填 UUID Query 参数，`knowledge_base_id` 放路径；此检索契约不变。`health_manager_ai` 只按 `source` 映射调用 `/search`，不调用 `/ask`。
 
 ```json
 {
@@ -845,6 +909,8 @@ GET $base/documents/{document_id}/versions/{document_version_id}/chunks?limit=10
 ### `POST /knowledge-bases/{knowledge_base_id}/ask?company_id={company_id}`
 
 请求参数与检索接口相同，`include_context` 默认值为 `true`，另支持可选 `session_id` UUID。接口先执行检索和可选 Rerank，再将命中的知识片段及其图片 Markdown 地址交给聊天模型生成 `answer`；`answer` 字段返回标准 Markdown 文本，标题、步骤、列表、表格和已提供的图片引用会保留。响应中的 `sources` 保留 Top-K 原始检索结果及来源，其中 `sources[].source.file_id` 是上传时提交的后台文件 ID，后台可据此拼接原文件下载地址；`sources[].assets[].url` 是文档图片地址。生成模型优先使用管理页配置的默认启用 Chat 模型档案（`kind=chat` 且 `is_default`），未配置时回落 `.env` 的 `KNOWLEDGE_SERVICE_CHAT_*` 配置，密钥复用 `KNOWLEDGE_SERVICE_MODEL_API_KEYS` 中的 `dashscope`。每次请求都会保存问答主记录、来源快照和检索/生成阶段日志；返回的 `qa_record_id` 可直接查询详情，`request_id` 用于日志排查。
+
+命中库级或文档级 FAQ 时原样直出，不再检索和生成，响应 `faq_matched=true`。文档级 FAQ 只匹配文档**当前可检索版本**的条目，历史版本 FAQ 自动失效（随版本回滚重新生效），管理端列表同样不再展示这些旧版本条目。文档级 FAQ 命中会返回原文档引用：`sources` 只含一条来源，`content` 即 FAQ 答案，`source` 带 `document_id`、`document_version_id`、`filename`、`version_number`，`source.chunk_id` 为空且 `scores` 各项为空（直出没有检索分数，不会触发低分待补资料）。库级手工 FAQ 没有文档出处，`sources` 返回空列表，调用方按 `faq_matched` 区分直出与检索。
 
 ```json
 {
@@ -874,7 +940,7 @@ GET /qa-records/{qa_record_id}?company_id={company_id}
 
 ## 项目问答轨迹
 
-项目问答轨迹记录外部项目（例如 `test_agent`）每次问答的完整链路：问题、最终回答、每次检索尝试、召回片段正文快照和文档版本来历。只记录接入后携带轨迹请求头的新请求，不回溯历史问答。
+项目问答轨迹记录外部项目（例如 `health_manager_ai`）每次问答的完整链路：问题、最终回答、每次检索尝试、召回片段正文快照和文档版本来历。只记录接入后携带轨迹请求头的新请求，不回溯历史问答。
 
 ### 记录检索
 
@@ -882,7 +948,7 @@ GET /qa-records/{qa_record_id}?company_id={company_id}
 
 | 请求头 | 长度上限 | 说明 |
 | --- | --- | --- |
-| `X-Project-Key` | 80 | 已登记且启用的项目标识，例如 `test_agent` |
+| `X-Project-Key` | 80 | 已登记且启用的项目标识，例如 `health_manager_ai` |
 | `X-Trace-Id` | 128 | 调用方请求 ID；回填时作为路径参数 |
 | `X-Session-Id` | 128 | 调用方会话标识，可选 |
 | `X-User-Ref` | 64 | 调用方用户标识，建议传哈希，可选 |
@@ -895,7 +961,7 @@ GET /qa-records/{qa_record_id}?company_id={company_id}
 
 ```http
 PUT /knowledge-bases/{knowledge_base_id}/project-traces/{external_request_id}?company_id={company_id}
-X-Project-Key: test_agent
+X-Project-Key: health_manager_ai
 ```
 
 ```json
@@ -947,17 +1013,225 @@ GET /admin/project-traces/{trace_id}
 
 每个项目按 `app_projects.retention_days` 保留轨迹（默认 90 天）。清理是惰性的：新轨迹写入时顺带删除该项目超过保留期的记录，同一项目最多每 24 小时清理一次（`last_purged_at`），不影响检索与回填。
 
-`test_agent` 通过 `KNOWLEDGE_TRACE_PROJECT_KEY=test_agent` 启用轨迹上报；留空则保持无状态检索，只检索不记录。
+`health_manager_ai` 通过 `KNOWLEDGE_TRACE_PROJECT_KEY=health_manager_ai` 启用轨迹上报；留空则保持无状态检索，只检索不记录。迁移 `0031_rename_app_project` 把原 `test_agent` 项目就地改名为 `health_manager_ai`，项目 ID 不变，历史轨迹仍归属同一项目。
+
+## 用户反馈闭环
+
+终端用户的「有用 / 没用」反馈会回流到管理端，并把差评自动转入「待补资料」，补完资料后在管理端标记已处理。
+
+### 在线问答反馈
+
+`/ask`（含流式）返回的 `qa_record_id` 即反馈目标。鉴权与问答一致，公司 Token 只能操作本公司记录，跨公司返回 `404`：
+
+```http
+PUT /qa-records/{qa_record_id}/feedback?company_id={company_id}
+```
+
+```json
+{ "feedback": "down", "reason": "没有提到禁忌人群" }
+```
+
+| 字段 | 说明 |
+| --- | --- |
+| `feedback` | `up`、`down` 或 `null`；传 `null` 撤销反馈并清空原因与时间 |
+| `reason` | 可选，最多 500 字符，仅 `down` 时有意义 |
+
+点踩时如果记录复核状态仍是 `none`，服务端自动置为 `pending`（待补资料）；已标记 `resolved` 的记录再次点踩不会回退状态。点赞不改变复核状态。接口返回更新后的问答记录。
+
+管理端对应能力：
+
+- `GET /admin/qa-records?feedback=up|down` 按用户反馈筛选，`review_status=pending` 即待补资料列表。
+- `GET /admin/qa-records/export` 按列表同款筛选参数（`company_id`、`knowledge_base_id`、`status`、`review_status`、`faq_matched`、`feedback`、`q`、`start_time`、`end_time`）导出 CSV，返回 `text/csv` 附件 `qa-records-YYYYmmdd-HHMMSS.csv`，带 UTF-8 BOM 便于 Excel 直接打开。列固定 20 个（时间、公司、知识库、问题、状态、复核状态、用户反馈、回答来源、命中片段数、检索模式、top_k、聊天模型、检索/生成/总耗时、输入/输出/总 token、错误码、错误信息），不含答案正文；单次最多 5 万条，超出返回 `400`，需缩小时间范围或增加筛选。
+- `PATCH /admin/qa-records/{qa_record_id}/review`，体 `{"review_status": "resolved"|"none"}` 标记已补充或重新打开。
+- 列表与详情额外返回 `feedback`、`feedback_reason`、`feedback_at`、`review_status`；管理页可从待补记录一键沉淀为 FAQ。
+
+### 项目轨迹反馈
+
+`health_manager_ai` 等外部项目把终端用户反馈回传到检索轨迹，鉴权用对应公司的 Bearer Token，并携带检索时的 `X-Project-Key`：
+
+```http
+PUT /knowledge-bases/{knowledge_base_id}/project-traces/{external_request_id}/feedback?company_id={company_id}
+X-Project-Key: health_manager_ai
+```
+
+请求体与在线问答反馈相同。语义一致：`down` 时轨迹复核状态由 `none` 变为 `pending`，`null` 撤销反馈但不回退复核状态。项目未登记或停用、公司不匹配、轨迹不存在均返回 `404`。
+
+管理端通过 `GET /admin/project-traces?feedback=up|down&review_status=pending` 筛选，`PATCH /admin/project-traces/{trace_id}/review` 标记处理结果，返回体包含 `feedback`、`feedback_reason`、`feedback_at`、`review_status`。
+
+## 检索评测集
+
+评测集用固定的「问题 → 期望资料」用例回归检索质量，只调用检索、不生成回答，因此不消耗聊天 Token。评测数据目前由管理员先行准备，无历史数据时为空表，不影响问答与入库。
+
+### 数据模型
+
+| 表 | 用途 |
+| --- | --- |
+| `evaluation_sets` | 评测集，绑定一个子库，同一子库内名称唯一 |
+| `evaluation_cases` | 用例：问题、期望文档 ID、期望关键词、检索模式、`top_k`、启用开关 |
+| `evaluation_runs` | 一次运行的状态与汇总指标（`running`/`success`/`failed`） |
+| `evaluation_case_results` | 逐条用例结果快照，用例删除后仍保留（`case_id` 置空） |
+
+期望匹配规则：召回片段属于 `expected_document_ids` 之一，或其正文包含任一 `expected_keywords`，即视为该条结果匹配；一个用例的期望集合是两者的并集。用例的文档 ID 与关键词**至少填写一项**，清空两者返回 `422`。
+
+### 创建与维护
+
+```http
+POST /admin/evaluation-sets
+```
+
+```json
+{
+  "knowledge_base_id": "00000000-0000-0000-0000-000000000001",
+  "name": "体温计回归集",
+  "description": "覆盖校准、禁忌与技术参数"
+}
+```
+
+```http
+POST /admin/evaluation-sets/{set_id}/cases
+```
+
+```json
+{
+  "query": "红外体温计怎么校准？",
+  "expected_document_ids": ["00000000-0000-0000-0000-0000000000aa"],
+  "expected_keywords": ["校准", "环境温度"],
+  "retrieval_mode": "bm25",
+  "top_k": 5,
+  "is_enabled": true,
+  "notes": "手册第 3 章"
+}
+```
+
+约束：`retrieval_mode` 取 `hybrid`（默认）/`bm25`/`vector`，`top_k` 为 1–20（默认 5），单集单次批量导入上限 500 条。同一知识库内评测集重名返回 `409`；未知知识库或评测集返回 `404`。
+
+### 运行与指标
+
+```http
+POST /admin/evaluation-sets/{set_id}/run
+```
+
+返回 `202` 和运行记录，检索在服务进程内异步执行，**同一知识库同时只允许一个运行**，冲突返回 `409`；没有启用中的用例返回 `422`；知识库已被归档返回 `409`。运行超过 30 分钟仍未完成时自动标记为 `failed`（`error_message` 提示自动终止），不会阻塞后续运行。轮询 `GET /admin/evaluation-runs/{run_id}`，`status` 变为 `success`/`failed` 即结束。
+
+汇总指标（`metrics`，比例均为 0–1）：
+
+| 指标 | 含义 |
+| --- | --- |
+| `hit_rate` | `top_k` 内至少命中一条期望资料的用例比例 |
+| `recall_at_k` | 期望文档在 `top_k` 内的平均召回比例 |
+| `mrr` | 第一个相关结果倒数排名的平均值 |
+| `no_result_rate` | 完全没有召回结果的用例比例 |
+| `avg_latency_ms` | 单条检索平均耗时 |
+| `case_count` / `completed_count` / `errored_count` | 参与、完成、报错的用例数 |
+
+详情接口同时返回 `results`（逐条 `hit`、`first_relevant_rank`、`recall`、`reciprocal_rank`、`result_count`、`duration_ms`、`matches` 召回摘要与错误摘要）和 `baseline`（同评测集时间上更早的最近一次成功运行，含其指标），便于对比改动前后的检索效果。全部用例检索失败时整次运行标记 `failed`；单条失败不影响其余用例，使用例失败信息记入该条 `error_message`。
+
+## 任务中心
+
+```http
+GET /admin/tasks?kind=ingest&status=open&company_id=...&knowledge_base_id=...
+```
+
+把一个公司内的异步工作聚合成一张表：文档入库（`kind=ingest`）、FAQ 生成（`kind=faq`）、检索评测（`kind=evaluation`）。
+
+- `kind`（可选）：`ingest`、`faq`、`evaluation`，缺省返回三类。
+- `status`（可选，默认 `open`）：`open`（排队 + 进行中 + 失败 + 已取消）、`queued`、`running`、`failed`（含已取消）、`done`（成功）、`all`。
+- `company_id` / `knowledge_base_id`（可选）：按公司、子库过滤。
+
+状态归一：入库 `queued` → `queued`、`running` → `running`、`completed` → `success`、`failed`/`cancelled` → `failed`/`cancelled`；FAQ 生成取 outbox 事件，`pending` → `queued`、`processing` → `running`、`published` → `success`、`failed` → `failed`；评测运行直接透传 `running`/`success`/`failed`。
+
+去重与保留口径，避免同一对象反复出现：
+
+- 入库：每个文档只取最新版本的最新一次入库任务。
+- FAQ：每个文档只取最新一次生成事件；失败事件如果该版本已有自动 FAQ（说明后来已手动补齐），不再展示。
+- 评测：每个评测集只取最近一次运行。
+- 窗口：排队、进行中、失败的任务始终保留；已完成/已发布只保留当天（UTC）完成的记录。
+
+返回 `items`、`counts`（`queued`、`running`、`failed` 含取消、`done_today`，均为全量口径、不受 `status` 过滤影响）、`truncated`（超过 300 条被截断）与 `generated_at`。每条任务含 `kind`、`task_id`、`status`、`title`、`detail`、公司与知识库、`document_id`、`attempts`、`progress_current`/`progress_total`（评测进度）、时间戳、`duration_ms` 与 `error_message`。前端行内操作复用 `POST /documents/{document_id}/retry` 与 `POST /documents/{document_id}/faqs/generate`。
+
+## 全局搜索
+
+```http
+GET /admin/search?q=体温计&limit=5
+```
+
+跨六类资源做字面匹配（不走向量检索），按类型分组返回，每组带全量命中总数与截断后的条目：
+
+| `kind` | 匹配字段 | 跳转目标 |
+| --- | --- | --- |
+| `knowledge_base` | 知识库名称、说明 | 知识库列表 |
+| `document` | 文档文件名、文档标识 | 知识库详情的原文件预览 |
+| `faq` | 问题、答案（排除旧版本文档级 FAQ） | FAQ 管理并预填关键词 |
+| `qa_record` | 问题、答案 | 问答记录并预填关键词 |
+| `project_trace` | 问题、回答 | 项目记录并预填关键词 |
+| `product` | 产品名称、型号 | 产品目录并预填关键词 |
+
+- `q`：必填，1–100 字符；`%`、`_`、`\` 按字面量处理，不做通配。
+- `limit`：每组返回条数，默认 5、上限 10。
+- 返回 `q`、`took_ms` 与 `groups`；`groups` 中每组含 `kind`、`total`（该类型全量命中数）与 `items`，条目字段为 `id`、`title`、`snippet`（关键词前后文摘要）、`subtitle`（归属信息，如「公司 · 知识库」）、`status`、`knowledge_base_id`、`created_at`。
+
+## 统计仪表盘
+
+```http
+GET /admin/statistics?start=2026-10-01&end=2026-10-28
+```
+
+返回公司、知识库、文档与问答的汇总数字（`companies_total`、`knowledge_bases_total`、`documents_by_status`、`qa_by_status`、`review_pending`）、`token_usage` 用量汇总，以及统计窗口内的趋势与质量数据：
+
+- `start` / `end`（可选）：统计窗口边界，UTC 日期、含首尾。缺省时 `end` 为今天、`start` 为 `end` 前 13 天（即近 14 天）；起始晚于结束或跨度超过 366 天返回 400。
+- `range`：本次实际生效的窗口 `{start, end, days}`，供前端回显。
+- `daily_trend`：窗口内按 UTC 日期聚合的每日问答数、成功数、平均总耗时、输入/输出/总 token，缺失日期补零。
+- `recent`：窗口内的质量与耗时概览。
+- `cost`：窗口与累计的问答生成成本（按模型单价核算），字段见下文。
+- `token_usage.recent_*`：窗口内 token 用量；`prompt_tokens` 等不带 `recent_` 前缀的字段仍是全量累计。
+
+`recent` 字段：
+
+| 字段 | 含义 |
+| --- | --- |
+| `qa_total` / `qa_success` / `qa_no_results` / `qa_failed` | 窗口内各状态的问答条数（含 FAQ 直出） |
+| `failure_rate` / `no_result_rate` | 失败率、未命中率，百分比保留两位小数（0–100） |
+| `latency` | RAG 问答耗时分布（不含 FAQ 直出）：`retrieval_*`、`generation_*`、`total_*` 的 `p50`/`p90`（毫秒），`total_max_ms` 为最大总耗时；`sample_count` 为已记录总耗时的条数 |
+| `models` | 按 `chat_model_name` 分组（不含 FAQ 直出）；未命中这类没调聊天模型的记录，`key` 为空 |
+| `knowledge_bases` | 按知识库分组（不含 FAQ 直出），`label` 为知识库名 |
+
+分位数使用最近秩法；组内 `avg_total_duration_ms`、`p90_total_duration_ms` 只统计已记录总耗时的记录，无数据时为 `null`。`models` / `knowledge_bases` 按条数降序，条数相同按 `key` 升序。FAQ 直出没有调用聊天模型，混入会稀释分位数，因此不参与耗时与分组统计，但质量计数与 `daily_trend` 仍按全部记录聚合。
+
+`cost` 字段：问答生成阶段的成本核算，金额单位人民币元，按「当前配置」的模型单价实时计算。
+
+| 字段 | 含义 |
+| --- | --- |
+| `recent_cost` / `total_cost` | 窗口内 / 全部历史已定价记录的金额合计 |
+| `recent_priced_tokens` / `recent_unpriced_tokens` | 窗口内已定价 / 未配置单价的 token 数 |
+| `unpriced_models` | 窗口内出现但未配置单价的模型名（去重排序），`未记录模型` 表示历史记录没有模型名 |
+| `models` | 窗口内按 `chat_model_name` 分组的 `qa_count`、输入/输出/合计费用与 `priced` 标记，费用高的在前 |
+
+口径说明：只统计 `qa_records.prompt_tokens` / `completion_tokens`，因此 FAQ 直出、未命中与改造前未记录 token 的记录天然不计入；embedding、rerank、OCR 与 FAQ 生成等非问答调用也不计入。模型名与 `chat_model_name` 一致才参与核算，包括 `.env` 兜底的生成模型。单价调整后会按新单价重算历史金额，不做快照。
+
+## 计费单价
+
+```http
+PUT /admin/model-prices
+{"model_name": "qwen3.8-flash", "provider": "dashscope",
+ "input_price_per_million": 2, "output_price_per_million": 6}
+```
+
+- `model_name`（必填，≤200）：与问答记录中的生成模型名一致。
+- `provider`（可选）：仅用于展示。
+- `input_price_per_million` / `output_price_per_million`（必填）：元 / 百万 tokens，`≥0`，最多 6 位小数；负数或超出精度返回 `422`。
+- 同一模型名重复提交即覆盖（按模型名唯一），返回 `ModelPriceRead`：`id`、`model_name`、`provider`、两个单价（浮点）、`updated_at`。
+- `GET /admin/model-prices` 按模型名升序列出；`DELETE /admin/model-prices/{id}` 删除后该模型不再计入成本金额，token 仍保留在用量统计里。
+- 费用公式：`输入 tokens × 输入单价 / 1e6 + 输出 tokens × 输出单价 / 1e6`，服务端用 Decimal 计算、结果保留 6 位小数；未配置单价的模型金额按 0 计，并在 `unpriced_models` 中提示。
 
 ## 本地运行
 
-独立验证时从 `E:\llmpython\knowledge_base` 执行，使用本项目 `.env` 的 `KNOWLEDGE_SERVICE_DATABASE_URL`；嵌入 `test_agent` 时使用宿主原有的数据库配置。真实数据库迁移及实际 `.env` 更新仍待核对目标与备份，以下为待执行的部署步骤，不表示已完成。确认目标并备份后执行迁移和模型初始化；`0014_company_credentials`（父版本 `0013_document_asset_markers`）只建空表，不生成或导入公司凭据；`0025_multi_company_credentials`（父版本 `0024_qa_faq_matched`）把单凭据升级为多凭据，已有凭据保留为「默认凭据」：
+独立验证时从 `E:\llmpython\knowledge_base` 执行，使用本项目 `.env` 的 `KNOWLEDGE_SERVICE_DATABASE_URL`；嵌入 `test_agent` 时使用宿主原有的数据库配置。真实数据库迁移及实际 `.env` 更新仍待核对目标与备份，以下为待执行的部署步骤，不表示已完成。确认目标并备份后执行迁移和模型初始化；`0014_company_credentials`（父版本 `0013_document_asset_markers`）只建空表，不生成或导入公司凭据；`0025_multi_company_credentials`（父版本 `0024_qa_faq_matched`）把单凭据升级为多凭据，已有凭据保留为「默认凭据」；`0029_feedback_loop`（父版本 `0028_column_comments`）为 `qa_records` 与 `project_qa_traces` 增加反馈字段和复核状态；`0030_retrieval_evaluation`（父版本 `0029_feedback_loop`）新建 `evaluation_sets`、`evaluation_cases`、`evaluation_runs`、`evaluation_case_results` 四张评测表，均为空表；`0031_rename_app_project`（父版本 `0030_retrieval_evaluation`）把接入项目 `test_agent` 就地改名为 `health_manager_ai`，项目 ID 与历史轨迹归属不变；`0032_model_prices`（父版本 `0031_rename_app_project`）新建 `model_prices` 表，用于问答成本核算，初始为空表，单价在管理页「模型管理 → 计费单价」录入；`0033_admin_roles_audit`（父版本 `0032_model_prices`）为 `admin_credentials` 增加 `role` 列（存量凭据回填 `admin`，保持原有权限），并新建 `audit_logs` 表，初始为空表：
 
 ```powershell
 uv run alembic upgrade head
 uv run provision-knowledge-catalog --env
 ```
 
-独立运行前先配置非空管理员 Token，创建公司后通过管理员 API 为每个项目签发一枚公司凭据；已有单凭据在迁移 `0025_multi_company_credentials` 后保留为「默认凭据」，旧 Token 继续有效。凭据签发/重置/停用无需重启服务端（详见 [README](README.md)）。`test_agent` 仍填 `KNOWLEDGE_SERVICE_URL=http://127.0.0.1:8333/api/v1`、API 签发的对应项目公司凭据（禁止管理员 Token）、真实公司 UUID 和 `source -> 子库 UUID` 映射，并设 `CHAT_KNOWLEDGE_RETRIEVAL_ENABLED=true`；多枚凭据共享公司全部数据权限；客户端配置更新后重启。
+独立运行前先配置非空管理员 Token，创建公司后通过管理员 API 为每个项目签发一枚公司凭据；已有单凭据在迁移 `0025_multi_company_credentials` 后保留为「默认凭据」，旧 Token 继续有效。凭据签发/重置/停用无需重启服务端（详见 [README](README.md)）。`health_manager_ai` 填 `KNOWLEDGE_SERVICE_URL=http://127.0.0.1:8333/api/v1`、API 签发的对应项目公司凭据（禁止管理员 Token）、真实公司 UUID 和 `source -> 子库 UUID` 映射，并设 `CHAT_KNOWLEDGE_RETRIEVAL_ENABLED=true`；多枚凭据共享公司全部数据权限；客户端配置更新后重启。
 
 执行 `uv run python main.py`，当前本机及模板访问 `http://127.0.0.1:8333/docs`（代码默认端口 `8000`）；嵌入 `test_agent` 时启动宿主原有的 `main.py`，访问宿主的 `/docs`，公司凭据管理 API 仍必须管理员 Bearer。入库任务循环随 FastAPI 应用自动启动，无需额外终端；当前本地文件存储不需要外部对象存储。不要为此模块启动 Redis、Milvus、etcd 或 Celery。

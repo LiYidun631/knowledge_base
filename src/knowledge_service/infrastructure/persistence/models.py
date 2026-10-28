@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -12,6 +13,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    Numeric,
     String,
     Text,
     UniqueConstraint,
@@ -106,6 +108,27 @@ class ModelProfile(TimestampMixin, Base):
     )
 
 
+class ModelPrice(TimestampMixin, Base):
+    """生成模型计费单价（人民币/百万 token）；按模型名匹配问答记录，环境兜底模型也能定价。"""
+
+    __tablename__ = "model_prices"
+    __table_args__ = (
+        UniqueConstraint("model_name", name="uq_model_prices_model_name"),
+        {"mysql_engine": "InnoDB", "comment": "生成模型 token 单价，用于问答成本核算"},
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    model_name: Mapped[str] = mapped_column(String(200), nullable=False)
+    provider: Mapped[str | None] = mapped_column(String(80))
+    # 单价允许 6 位小数，避免低价模型（如 0.15 元/百万 token）被截断。
+    input_price_per_million: Mapped[Decimal] = mapped_column(
+        Numeric(12, 6), nullable=False, default=Decimal("0")
+    )
+    output_price_per_million: Mapped[Decimal] = mapped_column(
+        Numeric(12, 6), nullable=False, default=Decimal("0")
+    )
+
+
 class Company(TimestampMixin, Base):
     """公司租户；公共知识库服务以公司作为最外层数据隔离边界。"""
 
@@ -158,23 +181,45 @@ class AdminCredential(TimestampMixin, Base):
         {"mysql_engine": "InnoDB", "comment": "管理员访问凭据，仅保存哈希"},
     )
 
-    id: Mapped[UUID] = mapped_column(
-        Uuid(as_uuid=True), primary_key=True, default=uuid4
-    )
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
     name: Mapped[str] = mapped_column(String(120), nullable=False)
     token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     is_enabled: Mapped[bool] = mapped_column(
         Boolean, default=True, server_default=text("1"), nullable=False
     )
+    # 角色三档：admin 全权、operator 运营、viewer 只读；环境引导凭据固定按 admin。
+    role: Mapped[str] = mapped_column(
+        String(20), default="admin", server_default=text("'admin'"), nullable=False
+    )
+
+
+class AuditLog(TimestampMixin, Base):
+    """管理端写操作审计；只记录操作事实，不保存请求体，避免密钥等敏感内容落库。"""
+
+    __tablename__ = "audit_logs"
+    __table_args__ = (
+        Index("ix_audit_logs_created_at", "created_at"),
+        Index("ix_audit_logs_actor_name", "actor_name"),
+        {"mysql_engine": "InnoDB", "comment": "管理端写操作审计日志"},
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    # 操作者信息在写入时快照，凭据后续改名、停用或删除都不影响历史日志。
+    actor_name: Mapped[str] = mapped_column(String(120), nullable=False)
+    actor_role: Mapped[str] = mapped_column(String(20), nullable=False)
+    credential_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True))
+    method: Mapped[str] = mapped_column(String(10), nullable=False)
+    path: Mapped[str] = mapped_column(String(500), nullable=False)
+    status_code: Mapped[int] = mapped_column(Integer, nullable=False)
+    duration_ms: Mapped[int] = mapped_column(Integer, nullable=False)
+    client_ip: Mapped[str | None] = mapped_column(String(64))
 
 
 class AdminPromptOverride(TimestampMixin, Base):
     """管理端提示词覆写；存在时优先于提示词文件与内置默认生效。"""
 
     __tablename__ = "admin_prompt_overrides"
-    __table_args__ = (
-        {"mysql_engine": "InnoDB", "comment": "管理端提示词覆写"},
-    )
+    __table_args__ = ({"mysql_engine": "InnoDB", "comment": "管理端提示词覆写"},)
 
     name: Mapped[str] = mapped_column(String(100), primary_key=True)
     content: Mapped[str] = mapped_column(Text, nullable=False)
@@ -295,7 +340,8 @@ class ProductCatalog(TimestampMixin, Base):
     __tablename__ = "product_catalog"
     __table_args__ = (
         UniqueConstraint(
-            "product_name", "model_name",
+            "product_name",
+            "model_name",
             name="uq_product_catalog_product_model",
         ),
         {"mysql_engine": "InnoDB", "comment": "全局产品名称与型号目录"},
@@ -601,12 +647,17 @@ class QARecord(TimestampMixin, Base):
             "review_status IN ('none', 'pending', 'resolved')",
             name="ck_qa_records_review_status",
         ),
+        CheckConstraint(
+            "feedback IS NULL OR feedback IN ('up', 'down')",
+            name="ck_qa_records_feedback",
+        ),
         UniqueConstraint("request_id", name="uq_qa_records_request_id"),
         Index("ix_qa_records_knowledge_base_created", "knowledge_base_id", "created_at"),
         Index("ix_qa_records_company_created", "company_id", "created_at"),
         Index("ix_qa_records_session_created", "session_id", "created_at"),
         Index("ix_qa_records_status_created", "status", "created_at"),
         Index("ix_qa_records_review_created", "review_status", "created_at"),
+        Index("ix_qa_records_feedback_created", "feedback", "created_at"),
         {"mysql_engine": "InnoDB", "comment": "在线问答主记录和结果审计"},
     )
 
@@ -629,10 +680,12 @@ class QARecord(TimestampMixin, Base):
     top_k: Mapped[int] = mapped_column(Integer, nullable=False)
     include_context: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     status: Mapped[str] = mapped_column(String(20), default="running", nullable=False)
-    review_status: Mapped[str] = mapped_column(
-        String(20), default="none", nullable=False
-    )
+    review_status: Mapped[str] = mapped_column(String(20), default="none", nullable=False)
     faq_matched: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # 用户反馈：up 有帮助、down 无帮助；为空表示未反馈。点踩会自动进入待补资料。
+    feedback: Mapped[str | None] = mapped_column(String(10))
+    feedback_reason: Mapped[str | None] = mapped_column(String(500))
+    feedback_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     result_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     chat_provider: Mapped[str | None] = mapped_column(String(80))
     chat_model_name: Mapped[str | None] = mapped_column(String(200))
@@ -750,6 +803,14 @@ class ProjectQaTrace(TimestampMixin, Base):
             "status IN ('running', 'success', 'no_results', 'failed', 'clarification')",
             name="ck_project_qa_traces_status",
         ),
+        CheckConstraint(
+            "feedback IS NULL OR feedback IN ('up', 'down')",
+            name="ck_project_qa_traces_feedback",
+        ),
+        CheckConstraint(
+            "review_status IN ('none', 'pending', 'resolved')",
+            name="ck_project_qa_traces_review_status",
+        ),
         UniqueConstraint(
             "company_id",
             "project_id",
@@ -761,6 +822,8 @@ class ProjectQaTrace(TimestampMixin, Base):
         Index("ix_project_qa_traces_kb_created", "knowledge_base_id", "created_at"),
         Index("ix_project_qa_traces_status_created", "status", "created_at"),
         Index("ix_project_qa_traces_session_created", "session_ref", "created_at"),
+        Index("ix_project_qa_traces_feedback_created", "feedback", "created_at"),
+        Index("ix_project_qa_traces_review_created", "review_status", "created_at"),
         {"mysql_engine": "InnoDB", "comment": "外部项目问答轨迹与检索摘要"},
     )
 
@@ -810,10 +873,15 @@ class ProjectQaTrace(TimestampMixin, Base):
     total_tokens: Mapped[int | None] = mapped_column(Integer)
     error_code: Mapped[str | None] = mapped_column(String(100))
     error_message: Mapped[str | None] = mapped_column(Text)
-    finished_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
-    extra_metadata: Mapped[dict[str, Any]] = mapped_column(
-        json_type, default=dict, nullable=False
+    # 项目侧回传的用户反馈；点踩会自动进入待补资料，管理端可标记已处理。
+    feedback: Mapped[str | None] = mapped_column(String(10))
+    feedback_reason: Mapped[str | None] = mapped_column(String(500))
+    feedback_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    review_status: Mapped[str] = mapped_column(
+        String(20), default="none", server_default=text("'none'"), nullable=False
     )
+    finished_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    extra_metadata: Mapped[dict[str, Any]] = mapped_column(json_type, default=dict, nullable=False)
 
 
 class ProjectQaSource(TimestampMixin, Base):
@@ -821,9 +889,7 @@ class ProjectQaSource(TimestampMixin, Base):
 
     __tablename__ = "project_qa_sources"
     __table_args__ = (
-        UniqueConstraint(
-            "trace_id", "attempt_index", "rank", name="uq_project_qa_sources_rank"
-        ),
+        UniqueConstraint("trace_id", "attempt_index", "rank", name="uq_project_qa_sources_rank"),
         Index("ix_project_qa_sources_trace_attempt", "trace_id", "attempt_index"),
         Index("ix_project_qa_sources_company_created", "company_id", "created_at"),
         Index("ix_project_qa_sources_document", "document_id"),
@@ -864,6 +930,138 @@ class ProjectQaSource(TimestampMixin, Base):
     rrf_score: Mapped[float | None] = mapped_column(Float)
     rerank_score: Mapped[float | None] = mapped_column(Float)
     asset_ids: Mapped[list[str]] = mapped_column(json_type, default=list, nullable=False)
+
+
+class EvaluationSet(TimestampMixin, Base):
+    """检索评测集；用例只依赖知识库当前版本，不调用聊天模型。"""
+
+    __tablename__ = "evaluation_sets"
+    __table_args__ = (
+        UniqueConstraint("knowledge_base_id", "name", name="uq_evaluation_sets_kb_name"),
+        Index("ix_evaluation_sets_kb_created", "knowledge_base_id", "created_at"),
+        {"mysql_engine": "InnoDB", "comment": "检索评测集"},
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    knowledge_base_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("knowledge_bases.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    name: Mapped[str] = mapped_column(String(160), nullable=False)
+    description: Mapped[str | None] = mapped_column(String(1000))
+
+
+class EvaluationCase(TimestampMixin, Base):
+    """评测用例：记录期望命中的文档或正文关键词，支持启停而不删除历史。"""
+
+    __tablename__ = "evaluation_cases"
+    __table_args__ = (
+        CheckConstraint(
+            "retrieval_mode IN ('hybrid', 'bm25', 'vector')",
+            name="ck_evaluation_cases_retrieval_mode",
+        ),
+        CheckConstraint("top_k BETWEEN 1 AND 20", name="ck_evaluation_cases_top_k"),
+        Index("ix_evaluation_cases_set_created", "set_id", "created_at"),
+        {"mysql_engine": "InnoDB", "comment": "检索评测用例"},
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    set_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("evaluation_sets.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    query: Mapped[str] = mapped_column(Text, nullable=False)
+    # 期望命中的文档 ID 列表；文档被删除或替换后仍保留快照，未命中会如实体现在召回率。
+    expected_document_ids: Mapped[list[str]] = mapped_column(
+        json_type, default=list, nullable=False
+    )
+    # 期望在召回正文中出现的关键词；与文档 ID 任一匹配即视为相关。
+    expected_keywords: Mapped[list[str]] = mapped_column(json_type, default=list, nullable=False)
+    retrieval_mode: Mapped[str] = mapped_column(
+        String(20), default="hybrid", server_default=text("'hybrid'"), nullable=False
+    )
+    top_k: Mapped[int] = mapped_column(Integer, default=5, server_default=text("5"), nullable=False)
+    is_enabled: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default=text("1"), nullable=False
+    )
+    notes: Mapped[str | None] = mapped_column(String(1000))
+
+
+class EvaluationRun(TimestampMixin, Base):
+    """一次评测运行；指标在运行结束时一次性写入，失败保留错误摘要。"""
+
+    __tablename__ = "evaluation_runs"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('running', 'success', 'failed')",
+            name="ck_evaluation_runs_status",
+        ),
+        Index("ix_evaluation_runs_set_created", "set_id", "created_at"),
+        Index("ix_evaluation_runs_kb_created", "knowledge_base_id", "created_at"),
+        Index("ix_evaluation_runs_status_created", "status", "created_at"),
+        {"mysql_engine": "InnoDB", "comment": "检索评测运行记录"},
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    set_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("evaluation_sets.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    knowledge_base_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("knowledge_bases.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    company_id: Mapped[UUID | None] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("companies.id", ondelete="RESTRICT")
+    )
+    status: Mapped[str] = mapped_column(
+        String(20), default="running", server_default=text("'running'"), nullable=False
+    )
+    case_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    completed_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    metrics: Mapped[dict[str, Any]] = mapped_column(json_type, default=dict, nullable=False)
+    error_message: Mapped[str | None] = mapped_column(Text)
+    started_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(), default=utc_now, server_default=text("CURRENT_TIMESTAMP"), nullable=False
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+
+
+class EvaluationCaseResult(TimestampMixin, Base):
+    """单条用例的评测结果；保存命中片段摘要，便于逐条排查。"""
+
+    __tablename__ = "evaluation_case_results"
+    __table_args__ = (
+        UniqueConstraint("run_id", "case_id", name="uq_evaluation_case_results_run_case"),
+        Index("ix_evaluation_case_results_run", "run_id"),
+        Index("ix_evaluation_case_results_case", "case_id"),
+        {"mysql_engine": "InnoDB", "comment": "检索评测单条用例结果"},
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    run_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("evaluation_runs.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    case_id: Mapped[UUID | None] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("evaluation_cases.id", ondelete="SET NULL")
+    )
+    query: Mapped[str] = mapped_column(Text, nullable=False)
+    retrieval_mode: Mapped[str] = mapped_column(String(20), nullable=False)
+    top_k: Mapped[int] = mapped_column(Integer, nullable=False)
+    hit: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    first_relevant_rank: Mapped[int | None] = mapped_column(Integer)
+    recall: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    reciprocal_rank: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    result_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    duration_ms: Mapped[int | None] = mapped_column(Integer)
+    matches: Mapped[list[dict[str, Any]]] = mapped_column(json_type, default=list, nullable=False)
+    error_message: Mapped[str | None] = mapped_column(Text)
 
 
 class OutboxEvent(TimestampMixin, Base):

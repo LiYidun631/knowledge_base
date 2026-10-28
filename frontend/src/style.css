@@ -96,6 +96,21 @@
   --el-transition-duration: 0.2s;
   --el-transition-duration-fast: 0.15s;
   --kb-ease: cubic-bezier(0.4, 0, 0.2, 1);
+
+  /* —— 视觉体系令牌：字号阶梯 / 面板 —— */
+  --kb-font-2xs: 11px;
+  --kb-font-xs: 12px;
+  --kb-font-sm: 13px;
+  --kb-font-md: 14px;
+  --kb-font-lg: 16px;
+  --kb-font-xl: 20px;
+  --kb-panel-bg: #ffffff;
+  --kb-panel-border: var(--el-border-color);
+  --kb-panel-radius: 10px;
+  --kb-panel-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+  --kb-gap-tight: 8px;
+  --kb-gap: 12px;
+  --kb-gap-loose: 16px;
 }
 
 html,

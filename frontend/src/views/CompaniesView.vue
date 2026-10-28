@@ -2,6 +2,7 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { client, errorMessage } from '../api/client'
+import { canWrite, isFullAdmin } from '../api/session'
 
 interface Company {
   id: string
@@ -274,7 +275,7 @@ onMounted(loadCompanies)
     <template #header>
       <div class="head-row">
         <span class="head-title"><el-icon><OfficeBuilding /></el-icon>公司管理</span>
-        <el-button type="primary" :icon="'Plus'" @click="openCreateDialog">新建公司</el-button>
+        <el-button v-if="canWrite" type="primary" :icon="'Plus'" @click="openCreateDialog">新建公司</el-button>
       </div>
     </template>
 
@@ -307,11 +308,17 @@ onMounted(loadCompanies)
       </el-table-column>
       <el-table-column label="操作" width="340" fixed="right">
         <template #default="{ row }">
-          <el-button size="small" text type="primary" @click="openCredentialDialog(row)">
+          <el-button
+            v-if="isFullAdmin"
+            size="small"
+            text
+            type="primary"
+            @click="openCredentialDialog(row)"
+          >
             凭据管理
           </el-button>
           <el-button
-            v-if="row.has_vector_library"
+            v-if="canWrite && row.has_vector_library"
             size="small"
             text
             type="warning"
@@ -319,7 +326,7 @@ onMounted(loadCompanies)
           >
             删除大库
           </el-button>
-          <el-button size="small" text type="danger" @click="removeCompany(row)">删除</el-button>
+          <el-button v-if="canWrite" size="small" text type="danger" @click="removeCompany(row)">删除</el-button>
         </template>
       </el-table-column>
     </el-table>

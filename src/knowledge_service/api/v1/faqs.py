@@ -92,9 +92,7 @@ async def list_faqs(
         Query(max_length=200, description="对问题与答案做不区分大小写的模糊匹配。"),
     ] = None,
     page: Annotated[int, Query(ge=1, description="页码，从 1 开始。")] = 1,
-    page_size: Annotated[
-        int, Query(ge=1, le=100, description="每页条数，最多 100 条。")
-    ] = 20,
+    page_size: Annotated[int, Query(ge=1, le=100, description="每页条数，最多 100 条。")] = 20,
 ) -> FaqListResponse:
     await _require_kb(session, knowledge_base_id)
     if scope == "document" and document_id is None:
@@ -103,6 +101,15 @@ async def list_faqs(
             detail="scope=document 时必须提供 document_id",
         )
     conditions = [FaqEntry.knowledge_base_id == knowledge_base_id]
+    # 旧版本文档级 FAQ 已退出检索，列表一并不再展示；库级 FAQ 不受影响。
+    conditions.append(
+        or_(
+            FaqEntry.document_version_id.is_(None),
+            FaqEntry.document_version_id.in_(
+                select(DocumentVersion.id).where(DocumentVersion.is_current.is_(True))
+            ),
+        )
+    )
     if scope == "kb":
         conditions.append(FaqEntry.document_id.is_(None))
     elif document_id is not None:
@@ -117,9 +124,7 @@ async def list_faqs(
                 func.lower(FaqEntry.answer).like(keyword),
             )
         )
-    total = int(
-        await session.scalar(select(func.count(FaqEntry.id)).where(*conditions)) or 0
-    )
+    total = int(await session.scalar(select(func.count(FaqEntry.id)).where(*conditions)) or 0)
     rows = list(
         await session.scalars(
             select(FaqEntry)

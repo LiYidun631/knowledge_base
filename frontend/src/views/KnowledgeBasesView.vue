@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import axios from 'axios'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { client, errorMessage } from '../api/client'
+import { canWrite, isFullAdmin } from '../api/session'
 
 interface Company {
   id: string
@@ -217,6 +218,7 @@ const selectedCompany = computed(
 )
 
 function openWizard() {
+  if (!canWrite.value) return
   wizard.visible = true
   wizard.step = 0
   wizard.companyId = activeCompanies.value.some((c) => c.id === selectedCompanyId.value)
@@ -286,6 +288,10 @@ async function onCreate() {
     ElMessage.warning('请填写子库名称')
     return
   }
+  if (wizard.needLibrary && !isFullAdmin.value) {
+    ElMessage.warning('公司还没有向量大库，需要管理员先创建')
+    return
+  }
   wizard.submitting = true
   try {
     if (wizard.needLibrary) {
@@ -317,14 +323,17 @@ async function onCreate() {
 
 onMounted(async () => {
   try {
-    const [companyRes, profileRes, defaultsRes] = await Promise.all([
+    // 模型档案仅管理员可读；运营/只读不拉取，新建大库需管理员完成。
+    const [companyRes, defaultsRes] = await Promise.all([
       client.get<Company[]>('/companies'),
-      client.get<ModelProfile[]>('/admin/model-profiles'),
       client.get<ChunkDefaults>('/admin/chunk-defaults'),
     ])
     companies.value = companyRes.data
-    profiles.value = profileRes.data
     chunkDefaults.value = defaultsRes.data
+    if (isFullAdmin.value) {
+      const profileRes = await client.get<ModelProfile[]>('/admin/model-profiles')
+      profiles.value = profileRes.data
+    }
     if (!selectedCompanyId.value) {
       selectedCompanyId.value = activeCompanies.value[0]?.id ?? ''
     }
@@ -365,7 +374,7 @@ onMounted(async () => {
           @change="loadKbs"
         />
       </div>
-      <el-button type="primary" :icon="'Plus'" @click="openWizard">新建知识库</el-button>
+      <el-button v-if="canWrite" type="primary" :icon="'Plus'" @click="openWizard">新建知识库</el-button>
     </div>
 
     <div v-if="searchKeyword" class="search-hint">
@@ -437,7 +446,15 @@ onMounted(async () => {
             </div>
             <div class="kb-actions">
               <el-button size="small" type="primary" plain @click="router.push(`/kbs/${kb.id}`)">详情</el-button>
-              <el-button size="small" type="danger" plain @click="archiveKb(kb)">归档</el-button>
+              <el-button
+                v-if="canWrite"
+                size="small"
+                type="danger"
+                plain
+                @click="archiveKb(kb)"
+              >
+                归档
+              </el-button>
             </div>
           </el-card>
         </el-col>
@@ -488,8 +505,24 @@ onMounted(async () => {
                 </div>
               </div>
               <div class="kb-actions">
-                <el-button size="small" type="primary" plain @click="restoreKb(kb)">恢复</el-button>
-                <el-button size="small" type="danger" plain @click="purgeKb(kb)">删除</el-button>
+                <el-button
+                  v-if="canWrite"
+                  size="small"
+                  type="primary"
+                  plain
+                  @click="restoreKb(kb)"
+                >
+                  恢复
+                </el-button>
+                <el-button
+                  v-if="canWrite"
+                  size="small"
+                  type="danger"
+                  plain
+                  @click="purgeKb(kb)"
+                >
+                  删除
+                </el-button>
               </div>
             </el-card>
           </el-col>
@@ -543,45 +576,54 @@ onMounted(async () => {
       </div>
 
       <div v-else-if="wizard.step === 1 && wizard.needLibrary" class="wizard-panel">
-        <el-form label-width="110px">
-          <el-form-item label="大库名称" required>
-            <el-input v-model="wizard.libraryName" placeholder="例如：公司名向量大库" />
-          </el-form-item>
-          <el-form-item label="Embedding" required>
-            <el-select v-model="wizard.embeddingModelId" placeholder="选择 Embedding 模型" style="width: 100%">
-              <el-option
-                v-for="profile in embeddingProfiles"
-                :key="profile.id"
-                :label="`${profile.name}（${profile.model_name}）`"
-                :value="profile.id"
-              />
-            </el-select>
-          </el-form-item>
-          <el-form-item label="Rerank">
-            <el-select v-model="wizard.rerankChoice" placeholder="使用默认 Rerank 模型" style="width: 100%">
-              <el-option label="使用默认 Rerank 模型" value="" />
-              <el-option
-                v-for="profile in rerankProfiles"
-                :key="profile.id"
-                :label="`${profile.name}（${profile.model_name}）`"
-                :value="profile.id"
-              />
-              <el-option label="不使用 Rerank" value="none" />
-            </el-select>
-          </el-form-item>
-        </el-form>
+        <template v-if="isFullAdmin">
+          <el-form label-width="110px">
+            <el-form-item label="大库名称" required>
+              <el-input v-model="wizard.libraryName" placeholder="例如：公司名向量大库" />
+            </el-form-item>
+            <el-form-item label="Embedding" required>
+              <el-select v-model="wizard.embeddingModelId" placeholder="选择 Embedding 模型" style="width: 100%">
+                <el-option
+                  v-for="profile in embeddingProfiles"
+                  :key="profile.id"
+                  :label="`${profile.name}（${profile.model_name}）`"
+                  :value="profile.id"
+                />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="Rerank">
+              <el-select v-model="wizard.rerankChoice" placeholder="使用默认 Rerank 模型" style="width: 100%">
+                <el-option label="使用默认 Rerank 模型" value="" />
+                <el-option
+                  v-for="profile in rerankProfiles"
+                  :key="profile.id"
+                  :label="`${profile.name}（${profile.model_name}）`"
+                  :value="profile.id"
+                />
+                <el-option label="不使用 Rerank" value="none" />
+              </el-select>
+            </el-form-item>
+          </el-form>
+          <el-alert
+            v-if="embeddingProfiles.length === 0"
+            type="error"
+            :closable="false"
+            show-icon
+            title="没有启用的 Embedding 模型，请先到「模型管理」创建并启用。"
+          />
+          <el-alert
+            type="warning"
+            :closable="false"
+            show-icon
+            title="模型在大库创建时锁定；已有文档的库不能更换模型，更换需新建大库。"
+          />
+        </template>
         <el-alert
-          v-if="embeddingProfiles.length === 0"
-          type="error"
-          :closable="false"
-          show-icon
-          title="没有启用的 Embedding 模型，请先到「模型管理」创建并启用。"
-        />
-        <el-alert
+          v-else
           type="warning"
           :closable="false"
           show-icon
-          title="模型在大库创建时锁定；已有文档的库不能更换模型，更换需新建大库。"
+          title="该公司还没有向量大库；绑定模型属于管理员操作，请让管理员先创建大库后再新建子库。"
         />
       </div>
 
@@ -626,7 +668,7 @@ onMounted(async () => {
           v-else
           type="primary"
           :loading="wizard.submitting"
-          :disabled="wizard.needLibrary && embeddingProfiles.length === 0"
+          :disabled="wizard.needLibrary && (!isFullAdmin || embeddingProfiles.length === 0)"
           @click="onCreate"
         >
           创建

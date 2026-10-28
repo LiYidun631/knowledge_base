@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import type { TableInstance } from 'element-plus'
 import { client, errorMessage, errorText } from '../api/client'
+import { canWrite, isFullAdmin } from '../api/session'
 import FaqPanel from '../components/FaqPanel.vue'
 import DocumentPreviewDrawer from '../components/DocumentPreviewDrawer.vue'
 import { resolveInlineImages } from '../utils/assets'
@@ -886,12 +887,13 @@ async function openPreview(document: DocumentItem) {
 
 // 切块正文渲染：后端已把图片占位符换成 ![](资产URL)，这里先转成带鉴权的 blob 地址。
 // 表格块按管道行格式渲染为 HTML 表格，普通块保持原文并内嵌图片。
+// 注意不用 loading="lazy"：抽屉+折叠面板里原生懒加载常不触发，导致图片一直不显示。
 function chunkHtml(parent: ChunkParent): string {
   const content = parent.rendered ?? parent.content
-  if (parent.block_type === 'table') return renderMarkdown(content)
+  if (parent.block_type === 'table') return renderMarkdown(content, 2, { lazyImages: false })
   return escapeHtml(content).replace(
     /!\[([^\]]*)\]\(([^)]+)\)/g,
-    '<img class="md-image" src="$2" alt="$1" loading="lazy">',
+    '<img class="md-image" src="$2" alt="$1">',
   )
 }
 
@@ -899,7 +901,7 @@ function childChunkHtml(child: ChunkChild): string {
   const content = child.rendered ?? child.content
   return escapeHtml(content).replace(
     /!\[([^\]]*)\]\(([^)]+)\)/g,
-    '<img class="md-image" src="$2" alt="$1" loading="lazy">',
+    '<img class="md-image" src="$2" alt="$1">',
   )
 }
 
@@ -939,6 +941,40 @@ async function loadChunks(reset: boolean) {
 
 function formatChars(value: number): string {
   return value >= 10000 ? `${(value / 10000).toFixed(1)} 万` : String(value)
+}
+
+// 版本回滚：仅翻转后端的当前版本标志，检索/FAQ/原文件预览随之切换。
+const activatingVersionId = ref('')
+const selectedVersion = computed(() =>
+  preview.versions.find((item) => item.id === preview.versionId),
+)
+
+async function activateVersion() {
+  const document = preview.document
+  const version = preview.versions.find((item) => item.id === preview.versionId)
+  if (!document || !version || version.is_current) return
+  try {
+    await ElMessageBox.confirm(
+      `把 v${version.version_number} 设为当前检索版本？检索、FAQ 匹配与原文件预览都会切换到该版本，最新上传的 v${document.latest_version_number} 仍保留。`,
+      '切换当前版本',
+      { type: 'warning', confirmButtonText: '切换', cancelButtonText: '取消' },
+    )
+  } catch {
+    return
+  }
+  activatingVersionId.value = version.id
+  try {
+    await client.post(`/documents/${document.id}/versions/${version.id}/activate`)
+    ElMessage.success(`已切换到 v${version.version_number}`)
+    const { data } = await client.get<DocumentVersion[]>(`/documents/${document.id}/versions`)
+    preview.versions = data
+    preview.versionId = version.id
+    await loadChunks(true)
+  } catch (error) {
+    errorMessage(error, '切换版本失败')
+  } finally {
+    activatingVersionId.value = ''
+  }
 }
 
 // —— 删除文档 ——
@@ -1002,17 +1038,30 @@ async function batchDeleteDocuments() {
 
 onMounted(async () => {
   try {
-    const [kbRes, profileRes, defaultsRes] = await Promise.all([
+    // 模型档案仅管理员可读；其他角色不拉取，配置 tab 也不展示。
+    const [kbRes, defaultsRes] = await Promise.all([
       client.get<KbDetail>(`/knowledge-bases/${kbId}`),
-      client.get<ModelProfile[]>('/admin/model-profiles'),
       client.get<ChunkDefaults>('/admin/chunk-defaults'),
     ])
     kb.value = kbRes.data
-    profiles.value = profileRes.data
     chunkDefaults.value = defaultsRes.data
+    if (isFullAdmin.value) {
+      const profileRes = await client.get<ModelProfile[]>('/admin/model-profiles')
+      profiles.value = profileRes.data
+    }
     initConfigForm()
     await reloadFiles()
     void loadCatalogOptions().catch(() => undefined)
+    // 全局搜索命中文档时带 doc 参数跳转，进入后直接打开原文件预览。
+    const targetDoc = route.query.doc
+    if (typeof targetDoc === 'string' && targetDoc) {
+      try {
+        const { data } = await client.get<DocumentItem>(`/documents/${targetDoc}`)
+        previewFile(data)
+      } catch {
+        // 文档已删除或不属于当前账号可见范围时保持常规页面即可。
+      }
+    }
   } catch (error) {
     errorMessage(error, '加载知识库失败')
   }
@@ -1046,7 +1095,7 @@ onMounted(async () => {
             <div class="panel-head">
               <span>目录</span>
               <el-button
-                v-if="kb.status === 'active'"
+                v-if="canWrite && kb.status === 'active'"
                 size="small"
                 type="primary"
                 plain
@@ -1070,7 +1119,7 @@ onMounted(async () => {
                   <el-icon><Folder /></el-icon>
                   <span class="node-label">{{ data.label }}</span>
                   <el-dropdown
-                    v-if="kb.status === 'active'"
+                    v-if="canWrite && kb.status === 'active'"
                     trigger="click"
                     class="node-more"
                     @command="(command: string) => onFolderCommand(command, data)"
@@ -1097,7 +1146,7 @@ onMounted(async () => {
               </span>
               <div class="panel-actions">
                 <el-button
-                  v-if="kb.status === 'active' && selectedDocuments.length > 0"
+                  v-if="canWrite && kb.status === 'active' && selectedDocuments.length > 0"
                   size="small"
                   type="danger"
                   plain
@@ -1107,7 +1156,7 @@ onMounted(async () => {
                   批量删除（{{ selectedDocuments.length }}）
                 </el-button>
                 <el-button
-                  v-if="kb.status === 'active' && kb.company_id"
+                  v-if="canWrite && kb.status === 'active' && kb.company_id"
                   size="small"
                   type="primary"
                   :icon="'Upload'"
@@ -1116,7 +1165,7 @@ onMounted(async () => {
                   上传文件
                 </el-button>
                 <el-tooltip
-                  v-else-if="kb.status === 'active'"
+                  v-else-if="canWrite && kb.status === 'active'"
                   content="该知识库缺少公司归属，无法上传文件"
                 >
                   <el-button size="small" type="primary" disabled>上传文件</el-button>
@@ -1146,7 +1195,7 @@ onMounted(async () => {
               empty-text="当前目录暂无文件"
               @selection-change="onSelectionChange"
             >
-              <el-table-column type="selection" width="40" :selectable="() => kb !== null && kb.status === 'active'" />
+              <el-table-column type="selection" width="40" :selectable="() => canWrite && kb !== null && kb.status === 'active'" />
               <el-table-column prop="filename" label="文件名" min-width="220" show-overflow-tooltip />
               <el-table-column label="状态" width="120">
                 <template #default="{ row }">
@@ -1181,8 +1230,9 @@ onMounted(async () => {
                     <el-button size="small" text type="primary" @click="previewFile(row)">预览</el-button>
                     <el-button size="small" text type="primary" @click="downloadFile(row)">下载</el-button>
                     <el-button size="small" text @click="openPreview(row)">切块</el-button>
-                    <el-button size="small" text @click="openMoveDialog(row)">移动</el-button>
+                    <el-button v-if="canWrite" size="small" text @click="openMoveDialog(row)">移动</el-button>
                     <el-button
+                      v-if="canWrite"
                       size="small"
                       text
                       type="primary"
@@ -1192,7 +1242,7 @@ onMounted(async () => {
                       新版本
                     </el-button>
                     <el-button
-                      v-if="row.status === 'failed'"
+                      v-if="canWrite && row.status === 'failed'"
                       size="small"
                       text
                       type="warning"
@@ -1202,7 +1252,7 @@ onMounted(async () => {
                     >
                       重试
                     </el-button>
-                    <el-button size="small" text type="danger" @click="removeDocument(row)">删除</el-button>
+                    <el-button v-if="canWrite" size="small" text type="danger" @click="removeDocument(row)">删除</el-button>
                   </div>
                 </template>
               </el-table-column>
@@ -1220,7 +1270,7 @@ onMounted(async () => {
         </div>
       </el-tab-pane>
 
-      <el-tab-pane label="配置" name="config">
+      <el-tab-pane v-if="isFullAdmin" label="配置" name="config">
         <div class="config-panel">
           <el-form label-width="130px" class="config-form">
             <el-form-item label="知识库名称" required>
@@ -1562,20 +1612,40 @@ onMounted(async () => {
     <el-dialog v-model="preview.visible" title="切块预览" width="760px" top="6vh">
       <div class="preview-toolbar">
         <span class="preview-file">{{ preview.document?.filename }}</span>
-        <el-select
-          v-model="preview.versionId"
-          size="small"
-          style="width: 260px"
-          placeholder="选择版本"
-          @change="loadChunks(true)"
-        >
-          <el-option
-            v-for="version in preview.versions"
-            :key="version.id"
-            :label="`v${version.version_number}${version.is_current ? '（当前）' : ''} · ${formatDateTime(version.created_at)}`"
-            :value="version.id"
-          />
-        </el-select>
+        <div class="preview-version-bar">
+          <el-select
+            v-model="preview.versionId"
+            size="small"
+            style="width: 260px"
+            placeholder="选择版本"
+            @change="loadChunks(true)"
+          >
+            <el-option
+              v-for="version in preview.versions"
+              :key="version.id"
+              :label="`v${version.version_number}${version.is_current ? '（当前）' : ''} · ${formatDateTime(version.created_at)}`"
+              :value="version.id"
+            />
+          </el-select>
+          <el-tag
+            v-if="selectedVersion?.is_current"
+            size="small"
+            type="success"
+            disable-transitions
+          >
+            当前版本
+          </el-tag>
+          <el-button
+            v-else-if="canWrite && selectedVersion"
+            size="small"
+            type="primary"
+            plain
+            :loading="activatingVersionId === selectedVersion.id"
+            @click="activateVersion"
+          >
+            设为当前版本
+          </el-button>
+        </div>
       </div>
       <div v-if="!preview.loading && preview.parents.length > 0" class="preview-stats">
         共 {{ preview.totalParents }} 个父块 · {{ preview.totalChildren }} 个子块 ·
@@ -1913,7 +1983,14 @@ onMounted(async () => {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 12px;
   margin-bottom: 12px;
+}
+.preview-version-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
 }
 .preview-file {
   font-weight: 600;

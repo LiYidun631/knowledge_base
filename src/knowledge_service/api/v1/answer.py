@@ -5,6 +5,7 @@ import json
 import logging
 import re
 from collections.abc import AsyncIterator
+from dataclasses import dataclass, field
 from time import perf_counter
 from typing import Annotated
 from uuid import UUID
@@ -15,6 +16,7 @@ from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from knowledge_service.api.v1.schemas import (
+    FeedbackWrite,
     KnowledgeAnswerRequest,
     KnowledgeAnswerResponse,
     QAEventRead,
@@ -29,6 +31,7 @@ from knowledge_service.application.faq.service import FaqModelUnavailable, match
 from knowledge_service.application.qa.service import (
     QASessionKnowledgeBaseMismatch,
     add_qa_event,
+    apply_feedback,
     finish_qa_failure,
     finish_qa_no_results,
     finish_qa_success,
@@ -51,6 +54,8 @@ from knowledge_service.infrastructure.model_providers.chat import (
 from knowledge_service.infrastructure.model_providers.embeddings import EmbeddingProviderError
 from knowledge_service.infrastructure.model_providers.rerank import RerankProviderError
 from knowledge_service.infrastructure.persistence.models import (
+    Document,
+    DocumentVersion,
     KnowledgeBase,
     ModelProfile,
     QAEvent,
@@ -63,15 +68,71 @@ router = APIRouter(tags=["知识库在线问答"])
 logger = logging.getLogger(__name__)
 
 
+@dataclass
+class _FaqCitation:
+    """FAQ 直出回答的引用来源；把问答对归回原文档，管理端可核对出处。"""
+
+    document_id: UUID | None
+    document_version_id: UUID | None
+    filename: str
+    version_number: int
+    content: str
+    chunk_id: UUID | None = None
+    page_number: int | None = None
+    section: str | None = None
+    context: str | None = None
+    cosine_distance: float | None = None
+    bm25_score: float | None = None
+    rrf_score: float | None = None
+    rerank_score: float | None = None
+    file_id: str | None = None
+    assets: list = field(default_factory=list)
+    context_sources: list = field(default_factory=list)
+
+
+async def _faq_citations(session: AsyncSession, faq_entry) -> list[_FaqCitation]:
+    """文档级 FAQ 命中时返回原文档引用；库级手工 FAQ 没有文档出处，返回空列表。"""
+    document_id = getattr(faq_entry, "document_id", None)
+    if document_id is None:
+        return []
+    document = await session.get(Document, document_id)
+    if document is None:
+        return []
+    document_version_id = getattr(faq_entry, "document_version_id", None)
+    version = (
+        await session.get(DocumentVersion, document_version_id)
+        if document_version_id is not None
+        else None
+    )
+    if version is None:
+        version = await session.scalar(
+            select(DocumentVersion).where(
+                DocumentVersion.document_id == document.id,
+                DocumentVersion.is_current.is_(True),
+            )
+        )
+    if version is None:
+        # 没有可用版本就无法给出可核对的出处，宁可不展示引用。
+        return []
+    return [
+        _FaqCitation(
+            document_id=document.id,
+            document_version_id=version.id,
+            filename=version.filename,
+            version_number=version.version_number,
+            # 直出内容就是常见问题答案本身，不伪造检索分数。
+            content=faq_entry.answer,
+        )
+    ]
+
+
 def _candidate_models(results: list) -> list[str]:
     """提取本次命中资料中的去重型号，并保持稳定排序。"""
     models: set[str] = set()
     for result in results:
         if result.model_name:
             models.add(str(result.model_name).strip())
-        models.update(
-            str(name).strip() for name in (result.model_names or []) if str(name).strip()
-        )
+        models.update(str(name).strip() for name in (result.model_names or []) if str(name).strip())
     return sorted(models)
 
 
@@ -198,11 +259,12 @@ async def ask_knowledge_base(
         )
         if faq_entry is not None:
             answer = faq_entry.answer
+            citations = await _faq_citations(session, faq_entry)
             await finish_qa_success(
                 session,
                 record,
                 answer=answer,
-                results=[],
+                results=citations,
                 retrieval_duration_ms=0,
                 generation_duration_ms=0,
                 total_duration_ms=_duration_ms(request_started_at),
@@ -224,7 +286,10 @@ async def ask_knowledge_base(
                 answer=answer,
                 faq_matched=True,
                 retrieval_mode=payload.retrieval_mode,
-                sources=[],
+                sources=[
+                    _result_to_schema(index, citation)
+                    for index, citation in enumerate(citations, start=1)
+                ],
             )
         results = await search_knowledge_base(
             session,
@@ -277,9 +342,7 @@ async def ask_knowledge_base(
                 results = [result for result in results if result.model_name in mentioned_models]
             else:
                 question = "请问您使用的是以下哪个型号？"
-                answer = question + "\n\n" + "\n".join(
-                    f"- {model}" for model in model_options
-                )
+                answer = question + "\n\n" + "\n".join(f"- {model}" for model in model_options)
                 generation_duration_ms = 0
                 await finish_qa_success(
                     session,
@@ -350,8 +413,7 @@ async def ask_knowledge_base(
                 ],
             )
         context = "\n\n".join(
-            _answer_context(index, result)
-            for index, result in enumerate(results, start=1)
+            _answer_context(index, result) for index, result in enumerate(results, start=1)
         )
         generation_started_at = perf_counter()
         usage: dict[str, int] = {}
@@ -488,9 +550,7 @@ def _exact_answer_with_images(results: list) -> str:
                     if chunk_id is None:
                         fallback_content.append((ordinal, sequence, item_content))
                     else:
-                        chunk_content.setdefault(
-                            chunk_id, (ordinal, sequence, item_content)
-                        )
+                        chunk_content.setdefault(chunk_id, (ordinal, sequence, item_content))
                     sequence += 1
             else:
                 fallback_content.append(
@@ -618,9 +678,7 @@ async def _stream_qa_events(
                 "Failed to persist QA stream failure: record_id=%s", record.id, exc_info=True
             )
 
-    yield _sse_event(
-        "meta", {"qa_record_id": str(record.id), "request_id": record.request_id}
-    )
+    yield _sse_event("meta", {"qa_record_id": str(record.id), "request_id": record.request_id})
     try:
         # FAQ 前置匹配：命中时原样直出，与 /ask 保持一致；产品/型号过滤同 match_faq。
         faq_entry = await match_faq(
@@ -632,11 +690,12 @@ async def _stream_qa_events(
         )
         if faq_entry is not None:
             answer = faq_entry.answer
+            citations = await _faq_citations(session, faq_entry)
             await finish_qa_success(
                 session,
                 record,
                 answer=answer,
-                results=[],
+                results=citations,
                 retrieval_duration_ms=0,
                 generation_duration_ms=0,
                 total_duration_ms=_duration_ms(request_started_at),
@@ -648,7 +707,14 @@ async def _stream_qa_events(
                 record.request_id,
                 faq_entry.id,
             )
-            yield done_event(answer, [], faq_matched=True)
+            yield done_event(
+                answer,
+                [
+                    _result_to_schema(index, citation)
+                    for index, citation in enumerate(citations, start=1)
+                ],
+                faq_matched=True,
+            )
             return
         results = await search_knowledge_base(
             session,
@@ -692,9 +758,7 @@ async def _stream_qa_events(
                 results = [result for result in results if result.model_name in mentioned_models]
             else:
                 question = "请问您使用的是以下哪个型号？"
-                answer = question + "\n\n" + "\n".join(
-                    f"- {model}" for model in model_options
-                )
+                answer = question + "\n\n" + "\n".join(f"- {model}" for model in model_options)
                 generation_duration_ms = 0
                 await finish_qa_success(
                     session,
@@ -742,15 +806,11 @@ async def _stream_qa_events(
             )
             yield done_event(
                 answer,
-                [
-                    _result_to_schema(index, result)
-                    for index, result in enumerate(results, start=1)
-                ],
+                [_result_to_schema(index, result) for index, result in enumerate(results, start=1)],
             )
             return
         context = "\n\n".join(
-            _answer_context(index, result)
-            for index, result in enumerate(results, start=1)
+            _answer_context(index, result) for index, result in enumerate(results, start=1)
         )
         generation_started_at = perf_counter()
         usage: dict[str, int] = {}
@@ -787,10 +847,7 @@ async def _stream_qa_events(
         )
         yield done_event(
             answer,
-            [
-                _result_to_schema(index, result)
-                for index, result in enumerate(results, start=1)
-            ],
+            [_result_to_schema(index, result) for index, result in enumerate(results, start=1)],
         )
     except asyncio.CancelledError:
         # 客户端断连会连带取消请求会话，改用独立后台任务落库，避免记录永久 running。
@@ -888,9 +945,7 @@ async def list_qa_records(
     company_id: Annotated[UUID, Query(description="公司租户 ID；必须与知识库归属一致。")],
     session: Annotated[AsyncSession, Depends(get_db_session)],
     page: Annotated[int, Query(ge=1, description="页码，从 1 开始。")] = 1,
-    page_size: Annotated[
-        int, Query(ge=1, le=100, description="每页数量，最多 100 条。")
-    ] = 20,
+    page_size: Annotated[int, Query(ge=1, le=100, description="每页数量，最多 100 条。")] = 20,
 ) -> QARecordListResponse:
     """分页返回问答记录摘要，便于后台查看和排查。"""
     exists = await session.scalar(
@@ -969,3 +1024,32 @@ async def get_qa_record(
         sources=[QASourceRead.model_validate(source) for source in sources],
         events=[QAEventRead.model_validate(event) for event in events],
     )
+
+
+@router.put(
+    "/qa-records/{qa_record_id}/feedback",
+    response_model=QARecordRead,
+    summary="提交问答反馈",
+    description=(
+        "用户对回答点赞或点踩；点踩会自动把未复核记录加入待补资料列表，"
+        "传 feedback=null 可撤销反馈。"
+    ),
+)
+async def submit_qa_feedback(
+    qa_record_id: Annotated[UUID, Path(description="问答记录 ID。")],
+    company_id: Annotated[UUID, Query(description="公司租户 ID；必须与记录归属一致。")],
+    payload: FeedbackWrite,
+    session: Annotated[AsyncSession, Depends(get_db_session, scope="function")],
+) -> QARecordRead:
+    """写入问答反馈，不修改答案本身。"""
+    record = await session.scalar(
+        select(QARecord).where(
+            QARecord.id == qa_record_id,
+            QARecord.company_id == company_id,
+        )
+    )
+    if record is None:
+        raise HTTPException(status_code=404, detail="问答记录不存在")
+    apply_feedback(record, feedback=payload.feedback, reason=payload.reason)
+    await session.commit()
+    return QARecordRead.model_validate(record)

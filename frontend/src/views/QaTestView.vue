@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { client, errorMessage, getToken, handleAuthStatus } from '../api/client'
+import { canWrite } from '../api/session'
 import { renderMarkdown } from '../utils/markdown'
 import { resolveInlineImages } from '../utils/assets'
 
@@ -39,10 +40,12 @@ interface AnswerSource {
 
 interface AnswerResponse {
   answer: string
+  qa_record_id: string
   clarification_required: boolean
   clarification_question: string | null
   clarification_options: string[]
   retrieval_mode: string
+  faq_matched: boolean
   sources: AnswerSource[]
 }
 
@@ -52,6 +55,11 @@ interface ChatMessage {
   sources: AnswerSource[]
   clarification: { question: string; options: string[] } | null
   streaming?: boolean
+  qaRecordId?: string
+  companyId?: string
+  faqMatched?: boolean
+  feedback?: 'up' | 'down' | null
+  feedbackReason?: string | null
 }
 
 interface ProductOptions {
@@ -93,6 +101,13 @@ const sessionId = ref('')
 const streamAbort = ref<AbortController | null>(null)
 const sourceDialogVisible = ref(false)
 const activeSource = ref<AnswerSource | null>(null)
+// 点踩时收集可选原因，提交后进入问答记录的待补资料闭环。
+const feedbackDialog = reactive({
+  open: false,
+  messageIndex: -1,
+  reason: '',
+  submitting: false,
+})
 // 推荐问题卡片：库级恒显，文档级随产品/型号过滤即时换池。
 const faqCards = ref<FaqCard[]>([])
 
@@ -369,6 +384,8 @@ async function streamAsk(kbId: string, companyId: string, text: string, messageI
   if (!message) return
   message.content = resolvedAnswer
   message.sources = resolvedSources
+  message.qaRecordId = donePayload.qa_record_id
+  message.faqMatched = donePayload.faq_matched
   message.clarification =
     donePayload.clarification_required && donePayload.clarification_question
       ? {
@@ -396,6 +413,7 @@ async function ask(forcedQuestion?: string) {
     sources: [],
     clarification: null,
     streaming: true,
+    companyId: kb.company_id,
   })
   asking.value = true
   try {
@@ -418,6 +436,60 @@ onMounted(async () => {
     errorMessage(error, '加载基础数据失败')
   }
 })
+
+// 反馈：点踩只记录问题不阻断使用，运营可在问答记录里转为待补资料或沉淀 FAQ。
+async function sendFeedback(
+  message: ChatMessage,
+  feedback: 'up' | 'down' | null,
+  reason: string | null = null,
+): Promise<boolean> {
+  if (!message.qaRecordId || !message.companyId) return false
+  try {
+    const { data } = await client.put(
+      `/qa-records/${message.qaRecordId}/feedback`,
+      { feedback, reason },
+      { params: { company_id: message.companyId } },
+    )
+    message.feedback = data.feedback
+    message.feedbackReason = data.feedback_reason
+    ElMessage.success(
+      feedback === 'down' ? '已记录，运营会跟进补充资料' : feedback === 'up' ? '感谢反馈' : '已撤销反馈',
+    )
+    return true
+  } catch (error) {
+    errorMessage(error, '提交反馈失败')
+    return false
+  }
+}
+
+function chooseFeedback(message: ChatMessage, feedback: 'up' | 'down') {
+  // 再点一次同一个按钮表示撤销。
+  if (message.feedback === feedback) {
+    void sendFeedback(message, null)
+    return
+  }
+  if (feedback === 'up') {
+    void sendFeedback(message, 'up')
+    return
+  }
+  const index = messages.value.indexOf(message)
+  if (index < 0) return
+  feedbackDialog.messageIndex = index
+  feedbackDialog.reason = message.feedbackReason ?? ''
+  feedbackDialog.open = true
+}
+
+async function submitDownFeedback() {
+  const message = messages.value[feedbackDialog.messageIndex]
+  if (!message) {
+    feedbackDialog.open = false
+    return
+  }
+  feedbackDialog.submitting = true
+  const saved = await sendFeedback(message, 'down', feedbackDialog.reason.trim() || null)
+  feedbackDialog.submitting = false
+  if (saved) feedbackDialog.open = false
+}
 </script>
 
 <template>
@@ -531,6 +603,15 @@ onMounted(async () => {
             <el-collapse-item :name="index">
               <template #title>
                 <span class="source-title">引用来源（{{ message.sources.length }}）</span>
+                <el-tag
+                  v-if="message.faqMatched"
+                  size="small"
+                  type="success"
+                  effect="plain"
+                  class="source-origin-tag"
+                >
+                  常见问题直出
+                </el-tag>
               </template>
               <div
                 v-for="source in message.sources"
@@ -548,11 +629,75 @@ onMounted(async () => {
                     {{ source.source.section }}
                   </el-tag>
                 </div>
-                <div class="source-score">{{ scoreSummary(source) }}</div>
+                <div v-if="scoreSummary(source)" class="source-score">
+                  {{ scoreSummary(source) }}
+                </div>
                 <p class="source-preview">{{ previewText(source.content) }}</p>
               </div>
             </el-collapse-item>
           </el-collapse>
+          <!-- 库级手工 FAQ 没有原文出处，明确标出直出来源，避免误以为丢失引用。 -->
+          <div v-else-if="message.faqMatched && !message.streaming" class="faq-direct-note">
+            <el-tag size="small" type="success" effect="plain">常见问题直出</el-tag>
+            <span class="faq-direct-text">该回答来自库内维护的常见问题</span>
+          </div>
+          <div v-if="canWrite && message.qaRecordId && !message.streaming" class="feedback-row">
+            <span class="feedback-label">这个回答</span>
+            <el-tooltip content="有帮助" placement="top" :show-after="200">
+              <button
+                type="button"
+                class="feedback-icon"
+                :class="{ active: message.feedback === 'up' }"
+                aria-label="回答有帮助"
+                @click.stop="chooseFeedback(message, 'up')"
+              >
+                <svg
+                  viewBox="0 0 24 24"
+                  width="17"
+                  height="17"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.7"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  aria-hidden="true"
+                >
+                  <path
+                    d="M7.5 10.6 11 3.6a1.9 1.9 0 0 1 3.5 1.3l-.7 3.7h4.4a2 2 0 0 1 2 2.4l-1.1 5.2a2.6 2.6 0 0 1-2.5 2.1H7.5"
+                  />
+                  <path d="M7.5 10.6H4.9A1.4 1.4 0 0 0 3.5 12v5.3a1.4 1.4 0 0 0 1.4 1.4h2.6z" />
+                </svg>
+              </button>
+            </el-tooltip>
+            <el-tooltip content="没帮助" placement="top" :show-after="200">
+              <button
+                type="button"
+                class="feedback-icon is-down"
+                :class="{ active: message.feedback === 'down' }"
+                aria-label="回答没帮助"
+                @click.stop="chooseFeedback(message, 'down')"
+              >
+                <svg
+                  viewBox="0 0 24 24"
+                  width="17"
+                  height="17"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.7"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  aria-hidden="true"
+                >
+                  <path
+                    d="M7.5 10.6 11 3.6a1.9 1.9 0 0 1 3.5 1.3l-.7 3.7h4.4a2 2 0 0 1 2 2.4l-1.1 5.2a2.6 2.6 0 0 1-2.5 2.1H7.5"
+                  />
+                  <path d="M7.5 10.6H4.9A1.4 1.4 0 0 0 3.5 12v5.3a1.4 1.4 0 0 0 1.4 1.4h2.6z" />
+                </svg>
+              </button>
+            </el-tooltip>
+            <span v-if="message.feedback === 'down'" class="feedback-note">已进入待补资料</span>
+            <span v-else-if="message.feedback === 'up'" class="feedback-note">已记录</span>
+          </div>
         </div>
       </div>
     </main>
@@ -684,6 +829,24 @@ onMounted(async () => {
         </el-tooltip>
       </div>
     </footer>
+
+    <el-dialog v-model="feedbackDialog.open" title="反馈这条回答" width="460px">
+      <p class="feedback-tip">说说哪里不对，运营会用它补充资料或沉淀 FAQ。</p>
+      <el-input
+        v-model="feedbackDialog.reason"
+        type="textarea"
+        :rows="3"
+        maxlength="500"
+        show-word-limit
+        placeholder="例如：答非所问、型号对不上（可选）"
+      />
+      <template #footer>
+        <el-button @click="feedbackDialog.open = false">取消</el-button>
+        <el-button type="primary" :loading="feedbackDialog.submitting" @click="submitDownFeedback">
+          提交反馈
+        </el-button>
+      </template>
+    </el-dialog>
 
     <el-dialog v-model="sourceDialogVisible" title="引用来源原文" width="640px">
       <template v-if="activeSource">
@@ -1329,6 +1492,17 @@ onMounted(async () => {
   color: var(--el-color-primary);
   font-weight: 600;
 }
+.source-origin-tag {
+  margin-left: 8px;
+}
+.faq-direct-note {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
 .source-item {
   border-top: 1px solid var(--el-border-color-lighter);
   padding: 8px 10px;
@@ -1368,14 +1542,80 @@ onMounted(async () => {
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
+.feedback-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+  padding-top: 9px;
+  border-top: 1px dashed var(--el-border-color-lighter);
+  font-size: 12px;
+}
+.feedback-label {
+  color: var(--el-text-color-placeholder);
+}
+/* 图标按钮：文字改为矢量拇指图标，悬停上浮、按下回弹，激活态用主题色点亮。 */
+.feedback-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 999px;
+  background: var(--el-bg-color);
+  color: var(--el-text-color-secondary);
+  cursor: pointer;
+  transition: color 0.15s var(--kb-ease), border-color 0.15s var(--kb-ease),
+    background-color 0.15s var(--kb-ease), box-shadow 0.15s var(--kb-ease),
+    transform 0.12s var(--kb-ease);
+}
+.feedback-icon:hover {
+  color: var(--el-color-primary);
+  border-color: var(--el-color-primary-light-5);
+  background: var(--el-color-primary-light-9);
+  transform: translateY(-1px);
+}
+.feedback-icon:active {
+  transform: scale(0.92);
+}
+.feedback-icon.active {
+  color: var(--el-color-primary);
+  border-color: var(--el-color-primary-light-3);
+  background: var(--el-color-primary-light-9);
+  box-shadow: 0 0 0 3px var(--el-color-primary-light-9);
+}
+.feedback-icon.is-down:hover {
+  color: var(--el-color-warning-dark-2);
+  border-color: var(--el-color-warning-light-5);
+  background: var(--el-color-warning-light-9);
+}
+.feedback-icon.is-down.active {
+  color: var(--el-color-warning-dark-2);
+  border-color: var(--el-color-warning-light-3);
+  background: var(--el-color-warning-light-9);
+  box-shadow: 0 0 0 3px var(--el-color-warning-light-9);
+}
+.feedback-icon.is-down svg {
+  transform: rotate(180deg);
+}
+.feedback-note {
+  color: var(--el-text-color-placeholder);
+}
+.feedback-tip {
+  margin: 0 0 10px;
+  font-size: 13px;
+  color: var(--el-text-color-secondary);
+}
+
 .source-dialog-head {
   display: flex;
   align-items: center;
   gap: 6px;
   margin-bottom: 10px;
   flex-wrap: wrap;
-}
-.source-dialog-content {
+}.source-dialog-content {
   word-break: break-word;
   line-height: 1.7;
   max-height: 50vh;

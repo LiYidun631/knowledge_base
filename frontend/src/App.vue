@@ -1,7 +1,14 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { clearToken, client, getToken, onAuthFailure } from './api/client'
+import { clearToken, getToken, onAuthFailure } from './api/client'
+import {
+  ROLE_LABELS,
+  adminIdentity,
+  canWrite,
+  loadIdentity,
+  setIdentity,
+} from './api/session'
 import LoginView from './views/LoginView.vue'
 
 const route = useRoute()
@@ -29,11 +36,14 @@ function toggleSidebar() {
   autoCollapsed = false
 }
 
+// 角色在 items 上标注 adminOnly；运营能改业务数据，只读连写入口都不显示。
 const menuGroups = [
   {
     title: '工作台',
     items: [
       { path: '/dashboard', label: '统计概览', icon: 'TrendCharts' },
+      { path: '/search', label: '全局搜索', icon: 'Search' },
+      { path: '/tasks', label: '任务中心', icon: 'Operation' },
       { path: '/kbs', label: '知识库管理', icon: 'Collection' },
       { path: '/catalog', label: '产品目录', icon: 'Goods' },
     ],
@@ -44,19 +54,36 @@ const menuGroups = [
       { path: '/qa', label: '问答测试', icon: 'ChatDotRound' },
       { path: '/qa-records', label: '问答记录', icon: 'Tickets' },
       { path: '/project-traces', label: '项目记录', icon: 'DataLine' },
+      { path: '/evaluation', label: '检索评测', icon: 'DataAnalysis' },
       { path: '/faqs', label: 'FAQ 管理', icon: 'ChatLineSquare' },
     ],
   },
   {
     title: '系统设置',
     items: [
-      { path: '/prompts', label: '提示词管理', icon: 'EditPen' },
-      { path: '/models', label: '模型管理', icon: 'Cpu' },
+      { path: '/prompts', label: '提示词管理', icon: 'EditPen', adminOnly: true },
+      { path: '/models', label: '模型管理', icon: 'Cpu', adminOnly: true },
       { path: '/companies', label: '公司管理', icon: 'OfficeBuilding' },
-      { path: '/admins', label: '管理员', icon: 'User' },
+      { path: '/admins', label: '管理员', icon: 'User', adminOnly: true },
+      { path: '/audit', label: '审计日志', icon: 'Document', adminOnly: true },
     ],
   },
 ]
+
+const visibleMenuGroups = computed(() => {
+  const isAdmin = adminIdentity.value?.role === 'admin'
+  return menuGroups
+    .map((group) => ({
+      ...group,
+      items: group.items.filter((item) => !item.adminOnly || isAdmin),
+    }))
+    .filter((group) => group.items.length > 0)
+})
+
+const roleLabel = computed(() =>
+  adminIdentity.value ? ROLE_LABELS[adminIdentity.value.role] : '',
+)
+const accountName = computed(() => adminIdentity.value?.name ?? '管理员')
 
 // 知识库详情页仍高亮「知识库管理」。
 const activeMenu = computed(() => (route.path.startsWith('/kbs/') ? '/kbs' : route.path))
@@ -77,7 +104,8 @@ watch(
 function submitSearch() {
   const q = search.value.trim()
   if (!q) return
-  router.push({ path: '/kbs', query: { q } })
+  // 顶栏是全局搜索入口：知识库、文档、FAQ、问答记录等一次搜完。
+  router.push({ path: '/search', query: { q } })
 }
 
 function clearSearch() {
@@ -95,16 +123,25 @@ function createKnowledgeBase() {
 // 401 时清除 Token 并退回登录页。
 onAuthFailure(() => {
   authorized.value = false
+  setIdentity(null)
 })
+
+// 进入应用后统一处理：非管理员落在管理员专属地址时退回概览，避免直接 403。
+async function enterApp() {
+  authorized.value = true
+  if (adminIdentity.value?.role !== 'admin' && route.meta.role === 'admin') {
+    await router.replace('/dashboard')
+  }
+}
 
 onMounted(async () => {
   syncViewport()
   window.addEventListener('resize', syncViewport)
-  // 已有 Token 时先验证一次，失效则被 401 拦截带回登录页。
+  // 已有 Token 时先验证身份，401 会被拦截器清理并带回登录页。
   if (!getToken()) return
   try {
-    await client.get('/companies')
-    authorized.value = true
+    await loadIdentity()
+    await enterApp()
   } catch {
     /* 拦截器已处理提示与清理 */
   }
@@ -116,12 +153,13 @@ onBeforeUnmount(() => {
 
 function logout() {
   clearToken()
+  setIdentity(null)
   authorized.value = false
 }
 </script>
 
 <template>
-  <LoginView v-if="!authorized" @authorized="authorized = true" />
+  <LoginView v-if="!authorized" @authorized="enterApp" />
   <div v-else class="layout">
     <aside class="aside" :class="{ collapsed }">
       <div class="logo">
@@ -139,7 +177,7 @@ function logout() {
         :collapse-transition="false"
         class="menu"
       >
-        <el-menu-item-group v-for="group in menuGroups" :key="group.title">
+        <el-menu-item-group v-for="group in visibleMenuGroups" :key="group.title">
           <template #title>
             <span v-show="!collapsed" class="menu-group-title">{{ group.title }}</span>
           </template>
@@ -173,10 +211,11 @@ function logout() {
 
         <div class="header-right">
           <el-input
+            v-if="route.path !== '/search'"
             v-model="search"
             class="global-search"
             :class="{ focused: searchFocused }"
-            placeholder="搜索知识库"
+            placeholder="搜索知识库、文档、FAQ…"
             clearable
             @focus="searchFocused = true"
             @blur="searchFocused = false"
@@ -188,14 +227,23 @@ function logout() {
             </template>
           </el-input>
 
-          <el-button type="primary" :icon="'Plus'" class="create-btn" @click="createKnowledgeBase">
+          <el-button
+            v-if="canWrite"
+            type="primary"
+            :icon="'Plus'"
+            class="create-btn"
+            @click="createKnowledgeBase"
+          >
             <span class="create-label">新建知识库</span>
           </el-button>
 
           <el-dropdown trigger="click" @command="(cmd: string) => cmd === 'logout' && logout()">
             <button class="account" type="button">
-              <span class="avatar">Y</span>
-              <span class="account-name">管理员</span>
+              <span class="avatar">{{ accountName.slice(0, 1) }}</span>
+              <span class="account-name">{{ accountName }}</span>
+              <span v-if="roleLabel" class="role-chip" :class="`role-${adminIdentity?.role}`">
+                {{ roleLabel }}
+              </span>
               <el-icon class="account-caret"><ArrowDown /></el-icon>
             </button>
             <template #dropdown>
@@ -469,6 +517,22 @@ function logout() {
 .account-name {
   font-size: 13px;
   color: #4e5969;
+}
+.role-chip {
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 11px;
+  line-height: 1.6;
+  background: #f2f3f5;
+  color: #6b7280;
+}
+.role-chip.role-admin {
+  background: #eef0fd;
+  color: #4f46e5;
+}
+.role-chip.role-operator {
+  background: #e8f4f1;
+  color: #0f766e;
 }
 .account-caret {
   font-size: 12px;

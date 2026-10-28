@@ -3,6 +3,7 @@ import axios from 'axios'
 import { ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { client, errorMessage, setToken } from '../api/client'
+import { setIdentity, type AdminIdentity } from '../api/session'
 
 const emit = defineEmits<{ (e: 'authorized'): void }>()
 
@@ -17,9 +18,12 @@ async function login() {
   }
   loading.value = true
   try {
-    // 用仅管理员可用的接口验证 Token：通过即管理员，失败走 401 拦截。
-    await client.get('/companies', { headers: { Authorization: `Bearer ${value}` } })
+    // /admin/me 只接受管理员侧 Token（含运营/只读），公司 Token 会被 403 拒绝。
+    const { data } = await client.get<AdminIdentity>('/admin/me', {
+      headers: { Authorization: `Bearer ${value}` },
+    })
     setToken(value)
+    setIdentity(data)
     emit('authorized')
   } catch (error) {
     // 401 已由全局拦截器提示并清理，这里只兜底其余失败原因。
@@ -39,13 +43,13 @@ async function login() {
         <span class="brand-mark">K</span>
         <span class="brand-name">知识库服务管理端</span>
       </div>
-      <p class="hint">请输入管理员 Token（仅保存在本浏览器 localStorage）</p>
+      <p class="hint">请输入管理端 Token（管理员 / 运营 / 只读，仅保存在本浏览器）</p>
       <el-input
         v-model="token"
         type="password"
         show-password
         size="large"
-        placeholder="管理员 Token"
+        placeholder="管理端 Token"
         @keyup.enter="login"
       />
       <el-button type="primary" size="large" class="login-btn" :loading="loading" @click="login">

@@ -1,6 +1,8 @@
 """管理员问答记录列表与详情接口验证。"""
 
 import asyncio
+import csv
+import io
 from datetime import datetime, timedelta
 from uuid import uuid4
 
@@ -178,16 +180,12 @@ def test_http_admin_qa_records_list_and_detail(monkeypatch, tmp_path) -> None:
             assert body["items"][0]["status"] == "success"
 
             # FAQ 直出过滤：默认记录未命中，只有显式标记的条目返回。
-            response = await client.get(
-                "admin/qa-records", params={"faq_matched": "true"}
-            )
+            response = await client.get("admin/qa-records", params={"faq_matched": "true"})
             body = response.json()
             assert body["total"] == 1
             assert body["items"][0]["query"] == "如何退款？"
             assert body["items"][0]["faq_matched"] is True
-            response = await client.get(
-                "admin/qa-records", params={"faq_matched": "false"}
-            )
+            response = await client.get("admin/qa-records", params={"faq_matched": "false"})
             assert response.json()["total"] == 2
 
             response = await client.get(
@@ -213,15 +211,11 @@ def test_http_admin_qa_records_list_and_detail(monkeypatch, tmp_path) -> None:
             assert body["total"] == 1
             assert body["items"][0]["query"] == "保修期多久？"
 
-            response = await client.get(
-                "admin/qa-records", params={"page": 1, "page_size": 2}
-            )
+            response = await client.get("admin/qa-records", params={"page": 1, "page_size": 2})
             body = response.json()
             assert body["total"] == 3
             assert len(body["items"]) == 2
-            response = await client.get(
-                "admin/qa-records", params={"page": 2, "page_size": 2}
-            )
+            response = await client.get("admin/qa-records", params={"page": 2, "page_size": 2})
             assert len(response.json()["items"]) == 1
 
             response = await client.get(f"admin/qa-records/{first.id}")
@@ -368,5 +362,167 @@ def test_http_admin_qa_record_snapshot_renders_asset_markers(monkeypatch, tmp_pa
             assert "[[KB_ASSET" not in content
             assert f"document-assets/{source_id}" in content
             assert content.startswith("步骤一：![")
+
+    asyncio.run(scenario())
+
+
+def test_http_admin_qa_records_export_csv(monkeypatch, tmp_path) -> None:
+    """导出接口按列表同款筛选条件输出带 BOM 的 CSV，并受单次条数上限保护。"""
+
+    async def scenario() -> None:
+        engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'admin_qa_export.db'}")
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+        async with factory() as session:
+            async with session.begin():
+                embedding = ModelProfile(
+                    name="export-embedding",
+                    kind="embedding",
+                    provider="openai_compatible",
+                    model_name="export-embedding",
+                    dimensions=2,
+                )
+                company_a = Company(code="export-a", name="导出甲公司")
+                company_b = Company(code="export-b", name="导出乙公司")
+                session.add_all([embedding, company_a, company_b])
+                await session.flush()
+                kb_a = KnowledgeBase(
+                    company_id=company_a.id, name="导出甲库", embedding_model_id=embedding.id
+                )
+                kb_b = KnowledgeBase(
+                    company_id=company_b.id, name="导出乙库", embedding_model_id=embedding.id
+                )
+                session.add_all([kb_a, kb_b])
+                await session.flush()
+                base = datetime(2026, 10, 1, 8, 0)
+                session.add_all(
+                    [
+                        QARecord(
+                            company_id=company_a.id,
+                            request_id=str(uuid4()),
+                            knowledge_base_id=kb_a.id,
+                            query="如何退款？",
+                            status="success",
+                            review_status="none",
+                            faq_matched=True,
+                            retrieval_mode="hybrid",
+                            top_k=5,
+                            include_context=True,
+                            result_count=2,
+                            chat_model_name="qwen3.8-flash",
+                            prompt_tokens=120,
+                            completion_tokens=30,
+                            total_tokens=150,
+                            created_at=base,
+                        ),
+                        QARecord(
+                            company_id=company_a.id,
+                            request_id=str(uuid4()),
+                            knowledge_base_id=kb_a.id,
+                            query="保修期多久？",
+                            status="no_results",
+                            review_status="pending",
+                            retrieval_mode="bm25",
+                            top_k=5,
+                            include_context=True,
+                            result_count=0,
+                            created_at=base + timedelta(days=1),
+                        ),
+                        QARecord(
+                            company_id=company_b.id,
+                            request_id=str(uuid4()),
+                            knowledge_base_id=kb_b.id,
+                            query="体温计怎么校准？",
+                            status="failed",
+                            review_status="pending",
+                            retrieval_mode="vector",
+                            top_k=3,
+                            include_context=False,
+                            result_count=0,
+                            error_code="UpstreamTimeout",
+                            error_message="上游 30s 未返回",
+                            created_at=base + timedelta(days=2),
+                        ),
+                    ]
+                )
+
+        def parse_csv(response: httpx.Response) -> list[list[str]]:
+            # BOM 让 Excel 直接识别 UTF-8；解析时用 utf-8-sig 去掉。
+            assert response.content.startswith(b"\xef\xbb\xbf")
+            return list(csv.reader(io.StringIO(response.content.decode("utf-8-sig"))))
+
+        settings = Settings(_env_file=None, auth_admin_token="admin-test-token")
+        app = _admin_qa_app(monkeypatch, settings, factory)
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test/api/v1/",
+        ) as anonymous:
+            response = await anonymous.get("admin/qa-records/export")
+            assert response.status_code == 401
+
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test/api/v1/",
+            headers={"Authorization": "Bearer admin-test-token"},
+        ) as client:
+            response = await client.get("admin/qa-records/export")
+            assert response.status_code == 200, response.text
+            assert response.headers["content-type"].startswith("text/csv")
+            disposition = response.headers["content-disposition"]
+            assert disposition.startswith("attachment;")
+            assert "qa-records-" in disposition and disposition.endswith('.csv"')
+
+            table = parse_csv(response)
+            assert table[0] == [
+                "时间(UTC)",
+                "公司",
+                "知识库",
+                "问题",
+                "状态",
+                "复核状态",
+                "用户反馈",
+                "回答来源",
+                "命中片段数",
+                "检索模式",
+                "top_k",
+                "聊天模型",
+                "检索耗时(ms)",
+                "生成耗时(ms)",
+                "总耗时(ms)",
+                "输入token",
+                "输出token",
+                "总token",
+                "错误码",
+                "错误信息",
+            ]
+            # 与列表一致按创建时间倒序；未记录字段留空。
+            assert [row[3] for row in table[1:]] == [
+                "体温计怎么校准？",
+                "保修期多久？",
+                "如何退款？",
+            ]
+            failed_row, _, success_row = table[1], table[2], table[3]
+            assert failed_row[1:3] == ["导出乙公司", "导出乙库"]
+            assert failed_row[18:20] == ["UpstreamTimeout", "上游 30s 未返回"]
+            assert success_row[1:3] == ["导出甲公司", "导出甲库"]
+            assert success_row[7] == "FAQ 直出"
+            assert success_row[11] == "qwen3.8-flash"
+            assert success_row[15:18] == ["120", "30", "150"]
+            assert success_row[0] == "2026-10-01 08:00:00"
+
+            response = await client.get("admin/qa-records/export", params={"status": "no_results"})
+            table = parse_csv(response)
+            assert len(table) == 2
+            assert table[1][3] == "保修期多久？"
+            assert table[1][7] == "模型生成"
+
+            # 超出上限时拒绝导出，避免一次拉全表。
+            from knowledge_service.api.v1 import admin as admin_module
+
+            monkeypatch.setattr(admin_module, "QA_EXPORT_MAX_ROWS", 2)
+            response = await client.get("admin/qa-records/export")
+            assert response.status_code == 400
+            assert "导出上限" in response.json()["detail"]
 
     asyncio.run(scenario())

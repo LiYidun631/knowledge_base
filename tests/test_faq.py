@@ -29,6 +29,7 @@ from knowledge_service.infrastructure.persistence.models import (
     KnowledgeBase,
     ModelProfile,
     OutboxEvent,
+    QASource,
 )
 from knowledge_service.infrastructure.persistence.session import get_db_session
 
@@ -101,9 +102,7 @@ def test_faq_crud_and_match(monkeypatch, tmp_path) -> None:
                     assert entry.source == "manual"
                     assert entry.document_id is None
 
-                    saved = await session.scalar(
-                        select(FaqEntry).where(FaqEntry.id == entry.id)
-                    )
+                    saved = await session.scalar(select(FaqEntry).where(FaqEntry.id == entry.id))
                     assert saved.question_embedding == _vector(1, 0, 0)
 
                     # 只改答案不重新向量化。
@@ -133,9 +132,7 @@ def test_faq_crud_and_match(monkeypatch, tmp_path) -> None:
 
                     # 无关问题落空。
                     assert (
-                        await match_faq(
-                            session, kb=knowledge_base, query="保修范围", threshold=0.8
-                        )
+                        await match_faq(session, kb=knowledge_base, query="保修范围", threshold=0.8)
                         is None
                     )
         finally:
@@ -224,9 +221,7 @@ def test_match_faq_excludes_stale_document_versions(monkeypatch, tmp_path) -> No
             monkeypatch.setattr(faq_service, "embed_texts", fake_embed)
 
             async with factory() as session:
-                hit = await match_faq(
-                    session, kb=knowledge_base, query="库级命中", threshold=0.9
-                )
+                hit = await match_faq(session, kb=knowledge_base, query="库级命中", threshold=0.9)
                 assert hit is not None and hit.source == "manual"
                 # 库级 FAQ 携带产品过滤时同样可命中。
                 hit = await match_faq(
@@ -247,9 +242,7 @@ def test_match_faq_excludes_stale_document_versions(monkeypatch, tmp_path) -> No
                 assert hit is not None and hit.question == "当前版本问题？"
                 # 文档级 FAQ：未携带产品过滤不放开。
                 assert (
-                    await match_faq(
-                        session, kb=knowledge_base, query="版本命中", threshold=0.9
-                    )
+                    await match_faq(session, kb=knowledge_base, query="版本命中", threshold=0.9)
                     is None
                 )
                 # 文档级 FAQ：产品不匹配不放开。
@@ -500,9 +493,7 @@ def test_generate_for_document_version(monkeypatch, tmp_path) -> None:
                     assert {entry.id for entry in entries} != first_ids
                     remaining = list(
                         await session.scalars(
-                            select(FaqEntry).where(
-                                FaqEntry.document_version_id == version_id
-                            )
+                            select(FaqEntry).where(FaqEntry.document_version_id == version_id)
                         )
                     )
                     assert len(remaining) == 2
@@ -556,6 +547,7 @@ def test_rewrite_faq(monkeypatch, tmp_path) -> None:
             async with engine.begin() as connection:
                 await connection.run_sync(Base.metadata.create_all)
             knowledge_base, _ = await _seed_kb_with_embedding(factory)
+
             async def fake_embed(_profile, texts):
                 return [[1.0, 0, 0] for _ in texts]
 
@@ -573,9 +565,7 @@ def test_rewrite_faq(monkeypatch, tmp_path) -> None:
                     entry = await create_faq(
                         session, kb=knowledge_base, question="如何开机？", answer="长按三秒。"
                     )
-                    await rewrite_faq(
-                        session, entry=entry, instruction="请写得正式一些"
-                    )
+                    await rewrite_faq(session, entry=entry, instruction="请写得正式一些")
                     assert entry.answer == "改写后的答案。"
                     assert calls[-1]["instruction"] == "请写得正式一些"
                     assert calls[-1]["question"] == "如何开机？"
@@ -611,10 +601,12 @@ def test_http_faq_endpoints(monkeypatch, tmp_path) -> None:
 
         app.dependency_overrides[get_db_session] = db_session
         monkeypatch.setattr(faq_service, "get_settings", lambda: settings)
+
         async def fake_embed(_profile, texts):
             return [[1.0, 0, 0] for _ in texts]
 
         monkeypatch.setattr(faq_service, "embed_texts", fake_embed)
+
         async def fake_pairs(**kwargs):
             return [
                 {"question": "自动问题？", "answer": "自动答案。"},
@@ -795,9 +787,7 @@ def test_http_faq_endpoints(monkeypatch, tmp_path) -> None:
             assert body["items"][0]["source"] == "auto"
 
             # 随机推荐：不传产品/型号只含库级条目；传过滤后通用资料文档级也参与；limit 生效。
-            response = await client.get(
-                f"admin/knowledge-bases/{knowledge_base.id}/faqs/random"
-            )
+            response = await client.get(f"admin/knowledge-bases/{knowledge_base.id}/faqs/random")
             assert response.status_code == 200, response.text
             assert len(response.json()) == 1  # 仅 1 条库级
             response = await client.get(
@@ -819,9 +809,7 @@ def test_http_faq_endpoints(monkeypatch, tmp_path) -> None:
             assert response.status_code == 404
             response = await client.patch(f"admin/faqs/{uuid4()}", json={"answer": "x"})
             assert response.status_code == 404
-            response = await client.get(
-                f"admin/knowledge-bases/{uuid4()}/faqs"
-            )
+            response = await client.get(f"admin/knowledge-bases/{uuid4()}/faqs")
             assert response.status_code == 404
 
         await engine.dispose()
@@ -953,7 +941,10 @@ def test_ask_endpoint_faq_direct_answer(monkeypatch, tmp_path) -> None:
             company_id = kb.company_id
 
             faq_entry = SimpleNamespace(
-                id=uuid4(), answer="长按电源键三秒即可开机。"
+                id=uuid4(),
+                answer="长按电源键三秒即可开机。",
+                document_id=None,
+                document_version_id=None,
             )
             match_calls: list[dict] = []
 
@@ -973,9 +964,7 @@ def test_ask_endpoint_faq_direct_answer(monkeypatch, tmp_path) -> None:
             monkeypatch.setattr(answer_module, "match_faq", fake_match_faq)
             monkeypatch.setattr(answer_module, "search_knowledge_base", fake_search)
 
-            payload = KnowledgeAnswerRequest(
-                query="怎么开机？", top_k=5, retrieval_mode="hybrid"
-            )
+            payload = KnowledgeAnswerRequest(query="怎么开机？", top_k=5, retrieval_mode="hybrid")
             async with factory() as session:
                 async with session.begin():
                     response = await answer_module.ask_knowledge_base(
@@ -1000,6 +989,209 @@ def test_ask_endpoint_faq_direct_answer(monkeypatch, tmp_path) -> None:
                 assert record.answer == "长按电源键三秒即可开机。"
                 # FAQ 直出需要落库标记，供问答记录页统计与筛选。
                 assert record.faq_matched is True
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_ask_endpoint_faq_document_citation(monkeypatch, tmp_path) -> None:
+    """文档级 FAQ 直出时返回原文档引用，管理端可核对出处且不产生低分待补资料。"""
+
+    async def scenario() -> None:
+        engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'faq-citation.db'}")
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            async with engine.begin() as connection:
+                await connection.run_sync(Base.metadata.create_all)
+            knowledge_base, _ = await _seed_kb_with_embedding(factory)
+            async with factory() as session:
+                async with session.begin():
+                    kb = await session.get(KnowledgeBase, knowledge_base.id)
+                    kb.status = "active"
+                    kb.company_id = uuid4()
+                    document = Document(
+                        knowledge_base_id=knowledge_base.id,
+                        document_key="bpw-manual",
+                        filename="腕式血压计说明书.pdf",
+                    )
+                    session.add(document)
+                    await session.flush()
+                    version = DocumentVersion(
+                        document_id=document.id,
+                        version_number=2,
+                        filename="腕式血压计说明书.pdf",
+                        size_bytes=10,
+                        content_sha256="9" * 64,
+                        object_key="k/bpw",
+                        status="completed",
+                        is_current=True,
+                    )
+                    session.add(version)
+                    await session.flush()
+                    document_id, version_id = document.id, version.id
+                company_id = kb.company_id
+
+            faq_entry = SimpleNamespace(
+                id=uuid4(),
+                answer="掌心向上，将腕带套在裸露的手腕上。",
+                document_id=document_id,
+                document_version_id=version_id,
+            )
+
+            async def fake_match_faq(*_args, **_kwargs):
+                return faq_entry
+
+            async def fake_search(*_args, **_kwargs):
+                raise AssertionError("FAQ 命中后不应再检索")
+
+            settings = Settings(
+                _env_file=None,
+                auth_admin_token="admin-test-token",
+                faq_match_threshold=0.85,
+            )
+            monkeypatch.setattr(answer_module, "get_settings", lambda: settings)
+            monkeypatch.setattr(answer_module, "match_faq", fake_match_faq)
+            monkeypatch.setattr(answer_module, "search_knowledge_base", fake_search)
+
+            payload = KnowledgeAnswerRequest(query="怎么戴腕带？", top_k=5)
+            async with factory() as session:
+                async with session.begin():
+                    response = await answer_module.ask_knowledge_base(
+                        knowledge_base_id=knowledge_base.id,
+                        company_id=company_id,
+                        payload=payload,
+                        session=session,
+                    )
+                assert response.faq_matched is True
+                assert len(response.sources) == 1
+                source = response.sources[0].source
+                assert source.document_id == document_id
+                assert source.document_version_id == version_id
+                assert source.filename == "腕式血压计说明书.pdf"
+                assert source.version_number == 2
+                assert response.sources[0].content == faq_entry.answer
+                # 直出来源没有检索分数，不应触发低分待补资料。
+                assert response.sources[0].scores.rerank_score is None
+
+                sources = list(await session.scalars(select(QASource)))
+                assert len(sources) == 1
+                assert sources[0].filename == "腕式血压计说明书.pdf"
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_list_faqs_hides_stale_document_versions(monkeypatch, tmp_path) -> None:
+    """管理端列表只展示库级 FAQ 与当前版本文档级 FAQ，旧版本条目随回滚一起隐藏。"""
+
+    settings = Settings(_env_file=None, auth_admin_token="admin-test-token")
+
+    import main
+
+    monkeypatch.setattr(main, "get_settings", lambda: settings)
+    app = main.create_app()
+    app.dependency_overrides[get_settings] = lambda: settings
+
+    async def scenario() -> None:
+        engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'faq-list.db'}")
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            async with engine.begin() as connection:
+                await connection.run_sync(Base.metadata.create_all)
+
+            async def db_session():
+                async with factory() as session:
+                    yield session
+                    await session.commit()
+
+            app.dependency_overrides[get_db_session] = db_session
+            knowledge_base, _ = await _seed_kb_with_embedding(factory)
+            async with factory() as session:
+                async with session.begin():
+                    document = Document(
+                        knowledge_base_id=knowledge_base.id,
+                        document_key="list-doc",
+                        filename="list-doc.md",
+                    )
+                    session.add(document)
+                    await session.flush()
+                    stale = DocumentVersion(
+                        document_id=document.id,
+                        version_number=1,
+                        filename="list-doc.md",
+                        size_bytes=10,
+                        content_sha256="a" * 64,
+                        object_key="k/1",
+                        status="completed",
+                        is_current=False,
+                    )
+                    current = DocumentVersion(
+                        document_id=document.id,
+                        version_number=2,
+                        filename="list-doc.md",
+                        size_bytes=10,
+                        content_sha256="b" * 64,
+                        object_key="k/2",
+                        status="completed",
+                        is_current=True,
+                    )
+                    session.add_all([stale, current])
+                    await session.flush()
+                    session.add_all(
+                        [
+                            FaqEntry(
+                                knowledge_base_id=knowledge_base.id,
+                                question="库级问题？",
+                                answer="库级答案。",
+                                question_embedding=_vector(1, 0, 0),
+                                source="manual",
+                            ),
+                            FaqEntry(
+                                knowledge_base_id=knowledge_base.id,
+                                document_id=document.id,
+                                document_version_id=stale.id,
+                                question="旧版本问题？",
+                                answer="旧版本答案。",
+                                question_embedding=_vector(1, 0, 0),
+                                source="auto",
+                            ),
+                            FaqEntry(
+                                knowledge_base_id=knowledge_base.id,
+                                document_id=document.id,
+                                document_version_id=current.id,
+                                question="当前版本问题？",
+                                answer="当前版本答案。",
+                                question_embedding=_vector(1, 0, 0),
+                                source="auto",
+                            ),
+                        ]
+                    )
+                    await session.flush()
+                    document_id = document.id
+
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app),
+                base_url="http://test/api/v1/",
+                headers={"Authorization": "Bearer admin-test-token"},
+            ) as client:
+                base = f"admin/knowledge-bases/{knowledge_base.id}/faqs"
+                response = await client.get(base)
+                assert response.status_code == 200, response.text
+                body = response.json()
+                assert body["total"] == 2
+                assert {item["question"] for item in body["items"]} == {
+                    "库级问题？",
+                    "当前版本问题？",
+                }
+
+                response = await client.get(base, params={"scope": "kb"})
+                assert response.json()["total"] == 1
+
+                response = await client.get(base, params={"document_id": str(document_id)})
+                assert response.json()["total"] == 1
+                assert response.json()["items"][0]["question"] == "当前版本问题？"
         finally:
             await engine.dispose()
 

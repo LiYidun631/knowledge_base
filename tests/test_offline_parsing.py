@@ -95,12 +95,8 @@ def test_docx_numbered_normal_paragraphs_create_nested_sections(monkeypatch) -> 
     blocks = parse_document("guide.docx", stream.getvalue())
 
     assert blocks[2].section == "3 正确的使用方法 / 3.1 测量步骤"
-    assert blocks[4].section == (
-        "3 正确的使用方法 / 3.1 测量步骤 / 3.1.1 耳温的测量方法"
-    )
-    assert blocks[6].section == (
-        "3 正确的使用方法 / 3.1 测量步骤 / 3.1.2 额温的测量方法"
-    )
+    assert blocks[4].section == ("3 正确的使用方法 / 3.1 测量步骤 / 3.1.1 耳温的测量方法")
+    assert blocks[6].section == ("3 正确的使用方法 / 3.1 测量步骤 / 3.1.2 额温的测量方法")
     assert blocks[8].section == "3 正确的使用方法 / 3.2 查看记忆"
 
 
@@ -118,20 +114,26 @@ def test_docx_heading_number_formats_are_supported(title, expected_level) -> Non
     assert parsing._docx_heading_level("Normal", title) == expected_level
 
 
-@pytest.mark.parametrize("text", [
-    "①按下电源键。",
-    "（1）等待提示音。",
-    "一、将探头插入耳道后开始测量。",
-    "步骤1：装好电池并开机。",
-])
+@pytest.mark.parametrize(
+    "text",
+    [
+        "①按下电源键。",
+        "（1）等待提示音。",
+        "一、将探头插入耳道后开始测量。",
+        "步骤1：装好电池并开机。",
+    ],
+)
 def test_docx_numbered_steps_are_not_headings(text) -> None:
     assert parsing._docx_heading_level("Normal", text) is None
 
 
 def test_docx_native_list_paragraphs_skip_numbered_heading_fallback() -> None:
-    assert parsing._docx_heading_level(
-        "List Number", "1. Press the power button", allow_numbered_fallback=False
-    ) is None
+    assert (
+        parsing._docx_heading_level(
+            "List Number", "1. Press the power button", allow_numbered_fallback=False
+        )
+        is None
+    )
 
 
 def test_markdown_recognizes_setext_and_ignores_code_fence_headings() -> None:
@@ -229,6 +231,7 @@ def test_docx_table_image_stays_in_its_cell(monkeypatch) -> None:
 
 def test_docx_images_use_bounded_concurrency_and_isolate_failures(monkeypatch) -> None:
     """DOCX 图片并发识别受配置限流，单张失败不影响其他图片和正文顺序。"""
+
     def make_image(color: str) -> bytes:
         stream = io.BytesIO()
         Image.new("RGB", (100, 80), color).save(stream, format="PNG")
@@ -286,9 +289,7 @@ def test_docx_images_use_bounded_concurrency_and_isolate_failures(monkeypatch) -
     paragraph_content = next(content for content in contents if "[[KB_ASSET:" in content)
     assert paragraph_content.index("第一张图前的说明") < paragraph_content.index("[[KB_ASSET:")
     assert paragraph_content.index("第一张图后的说明") > paragraph_content.index("[[KB_ASSET:")
-    assert sum(
-        len(block.assets) + int(block.asset_content is not None) for block in blocks
-    ) == 2
+    assert sum(len(block.assets) + int(block.asset_content is not None) for block in blocks) == 2
 
 
 def test_pdf_without_text_requires_ocr(monkeypatch) -> None:
@@ -383,6 +384,174 @@ def test_native_pdf_uses_typography_for_heading_paths_across_pages(monkeypatch) 
     assert body.section == "Operations Guide / 3.1 Operation"
     assert later_page.section == body.section
     assert body.metadata["heading_level"] is None
+
+
+def test_native_pdf_recovers_vector_table_and_drops_duplicate_text(monkeypatch) -> None:
+    """带文字层的矢量线框表格应还原为表格块，且单元格文字不再重复成正文。"""
+    import fitz
+
+    document = fitz.open()
+    page = document.new_page(width=400, height=300)
+    xs = [60, 160, 260, 360]
+    ys = [80, 130, 180]
+    for column in xs:
+        page.draw_line((column, ys[0]), (column, ys[-1]))
+    for row in ys:
+        page.draw_line((xs[0], row), (xs[-1], row))
+    cells = [["型号", "重量", "单位"], ["HBF-214", "1.6", "kg"]]
+    for row_index, row in enumerate(cells):
+        for column_index, text in enumerate(row):
+            page.insert_text((xs[column_index] + 6, ys[row_index] + 30), text, fontsize=12)
+    pdf_bytes = document.tobytes()
+    document.close()
+    monkeypatch.setattr(
+        parsing,
+        "get_settings",
+        lambda: SimpleNamespace(
+            ocr_model_name="",
+            ocr_layout_analysis_enabled=False,
+            ocr_layout_analysis_mode="auto",
+        ),
+    )
+
+    blocks = parse_document("spec.pdf", pdf_bytes)
+
+    table_blocks = [block for block in blocks if block.kind == "table"]
+    assert len(table_blocks) == 1
+    table = table_blocks[0]
+    assert table.metadata["table_header"]
+    assert "HBF-214" in table.content
+    # 表格内的文字不应再作为普通正文块重复出现。
+    assert all("HBF-214" not in block.content for block in blocks if block.kind == "text")
+
+
+def test_text_pdf_crops_vision_located_vector_illustrations(monkeypatch) -> None:
+    """有文字层且含矢量绘图的页面只向视觉模型要图片区域，大图按位置插入正文。"""
+    import fitz
+
+    document = fitz.open()
+    page = document.new_page(width=400, height=300)
+    page.insert_text((60, 40), "Step one", fontsize=12)
+    page.draw_rect(fitz.Rect(100, 100, 300, 260))
+    page.insert_text((60, 280), "Step two", fontsize=12)
+    pdf_bytes = document.tobytes()
+    document.close()
+
+    layout = LayoutResult(
+        blocks=(
+            LayoutBlock(kind="image", text="图片", bbox=(250.0, 333.0, 750.0, 866.0)),
+            # 与上图重叠超过七成，属同一示意图的重复检测，应被去重丢弃。
+            LayoutBlock(kind="image", text="图片", bbox=(260.0, 340.0, 740.0, 860.0)),
+            # 按钮小图标达不到示意图尺寸，应被过滤掉。
+            LayoutBlock(kind="image", text="图片", bbox=(10.0, 10.0, 60.0, 60.0)),
+        ),
+        markdown="",
+    )
+    calls = []
+
+    def fake_analyze_pdf_pages(content, *, settings, filename, page_numbers):
+        calls.append(page_numbers)
+        return {page_number: layout for page_number in page_numbers}
+
+    monkeypatch.setattr(parsing, "analyze_pdf_pages", fake_analyze_pdf_pages)
+
+    def fake_describe(content, name, media_type, metadata, description_cache=None):
+        return parsing.ParsedAsset(content, media_type, name, "示意图", metadata)
+
+    monkeypatch.setattr(parsing, "_describe_office_image", fake_describe)
+    monkeypatch.setattr(
+        parsing,
+        "get_settings",
+        lambda: SimpleNamespace(
+            ocr_model_name="vision",
+            ocr_layout_analysis_enabled=True,
+            ocr_layout_analysis_mode="auto",
+            ocr_embedded_concurrency=3,
+        ),
+    )
+
+    blocks = parse_document("foldout.pdf", pdf_bytes)
+
+    assert calls == [[1]]
+    image_blocks = [block for block in blocks if block.asset_content]
+    assert len(image_blocks) == 1
+    image = image_blocks[0]
+    assert image.page_number == 1
+    assert image.content.startswith("[[KB_ASSET:")
+    assert image.metadata["asset_description"] == "示意图"
+    assert image.metadata["asset_marker"] == image.content
+    assert [round(value, 1) for value in image.metadata["bbox"]] == [
+        250.0,
+        333.0,
+        750.0,
+        866.0,
+    ]
+    texts = [block for block in blocks if block.kind == "text" and not block.asset_content]
+    assert texts[0].content == "Step one"
+    assert texts[-1].content == "Step two"
+
+
+def test_pure_text_page_skips_vision_image_detection(monkeypatch) -> None:
+    """纯文字页面没有矢量内容，不应触发视觉模型调用。"""
+    import fitz
+
+    document = fitz.open()
+    page = document.new_page(width=400, height=300)
+    page.insert_text((60, 40), "Plain paragraph.", fontsize=12)
+    pdf_bytes = document.tobytes()
+    document.close()
+    monkeypatch.setattr(
+        parsing,
+        "get_settings",
+        lambda: SimpleNamespace(
+            ocr_model_name="vision",
+            ocr_layout_analysis_enabled=True,
+            ocr_layout_analysis_mode="auto",
+        ),
+    )
+    monkeypatch.setattr(
+        parsing,
+        "analyze_pdf_pages",
+        lambda *args, **kwargs: pytest.fail("纯文字页不应调用视觉模型"),
+    )
+
+    blocks = parse_document("text.pdf", pdf_bytes)
+
+    assert [block.content for block in blocks] == ["Plain paragraph."]
+
+
+def test_native_pdf_reads_two_column_layout_in_reading_order(monkeypatch) -> None:
+    """双栏版面应按「左栏自上而下，再右栏」输出；同基线被合并成宽块的也要拆回去。"""
+    import fitz
+
+    document = fitz.open()
+    page = document.new_page(width=500, height=400)
+    # 故意打乱写入顺序，模拟 PDF 内容流与视觉顺序不一致。
+    page.insert_text((320, 120), "Right column top", fontsize=12)
+    page.insert_text((60, 120), "Left column top", fontsize=12)
+    page.insert_text((320, 220), "Right column bottom", fontsize=12)
+    page.insert_text((60, 220), "Left column bottom", fontsize=12)
+    pdf_bytes = document.tobytes()
+    document.close()
+    monkeypatch.setattr(
+        parsing,
+        "get_settings",
+        lambda: SimpleNamespace(
+            ocr_model_name="",
+            ocr_layout_analysis_enabled=False,
+            ocr_layout_analysis_mode="auto",
+        ),
+    )
+
+    blocks = parse_document("foldout.pdf", pdf_bytes)
+
+    texts = [block.content for block in blocks if block.kind == "text"]
+    assert texts == [
+        "Left column top",
+        "Left column bottom",
+        "Right column top",
+        "Right column bottom",
+    ]
 
 
 def test_html_removes_scripts_and_avoids_duplicate_table_cells() -> None:
@@ -526,9 +695,7 @@ def test_markdown_table_becomes_table_block_with_header() -> None:
 
 def test_markdown_code_fence_pipes_are_not_tables() -> None:
     """代码围栏里的竖线行不能误判为表格。"""
-    source = (
-        "示例代码：\n\n```text\n| a | b |\n| --- | --- |\n|x|y|\n```\n\n结束。\n"
-    ).encode()
+    source = ("示例代码：\n\n```text\n| a | b |\n| --- | --- |\n|x|y|\n```\n\n结束。\n").encode()
     blocks = parse_document("code.md", source)
     assert all(block.kind == "text" for block in blocks)
     assert "| a | b |" in "".join(block.content for block in blocks)
@@ -565,12 +732,8 @@ def _epub_bytes() -> bytes:
         '<spine><itemref idref="ch2"/><itemref idref="ch1"/></spine>'
         "</package>"
     )
-    ch1 = (
-        "<html><body><h1>产品概述</h1><p>适用于家用场景。<br>支持蓝牙连接。</p></body></html>"
-    )
-    ch2 = (
-        "<html><body><h2>操作步骤</h2><p>长按电源键开机。</p></body></html>"
-    )
+    ch1 = "<html><body><h1>产品概述</h1><p>适用于家用场景。<br>支持蓝牙连接。</p></body></html>"
+    ch2 = "<html><body><h2>操作步骤</h2><p>长按电源键开机。</p></body></html>"
     stream = io.BytesIO()
     with zipfile.ZipFile(stream, "w") as archive:
         archive.writestr("mimetype", "application/epub+zip")

@@ -1,9 +1,18 @@
 import re
 from datetime import datetime
+from decimal import Decimal
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, SecretStr, field_validator
+from pydantic import (
+    AnyHttpUrl,
+    BaseModel,
+    ConfigDict,
+    Field,
+    SecretStr,
+    field_validator,
+    model_validator,
+)
 
 from knowledge_service.application.model_profiles import ModelProfileSpec
 
@@ -72,7 +81,10 @@ class SearchSource(BaseModel):
     version_number: int = Field(description="文档版本序号。")
     filename: str = Field(description="上传文件名。")
     file_id: str = Field(description="后台文件 ID；后台可据此拼接原文件下载地址。")
-    chunk_id: UUID = Field(description="返回正文对应的父块 ID。")
+    chunk_id: UUID | None = Field(
+        default=None,
+        description="返回正文对应的父块 ID；FAQ 直出来源没有切块时为空。",
+    )
     page_number: int | None = Field(description="页码；无法解析时为空。")
     section: str | None = Field(description="章节；无法解析时为空。")
     section_path: list[str] = Field(
@@ -181,6 +193,9 @@ class QARecordRead(BaseModel):
         description="复核状态：none 未复核、pending 待补资料、resolved 已补充。"
     )
     faq_matched: bool = Field(description="答案是否来自 FAQ 直接命中。")
+    feedback: Literal["up", "down"] | None = Field(description="用户反馈：up 有帮助、down 无帮助。")
+    feedback_reason: str | None = Field(description="用户填写的反馈原因。")
+    feedback_at: datetime | None = Field(description="最近一次反馈时间。")
     result_count: int = Field(description="实际保存的检索来源数量。")
     chat_provider: str | None = Field(description="回答模型供应商。")
     chat_model_name: str | None = Field(description="回答模型名称。")
@@ -279,6 +294,36 @@ class QARecordReviewPatch(BaseModel):
     )
 
 
+class FeedbackWrite(BaseModel):
+    """问答反馈；点踩会自动把记录加入待补资料列表。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    feedback: Literal["up", "down"] | None = Field(
+        description="up 有帮助、down 无帮助；传 null 清除已有反馈。"
+    )
+    reason: str | None = Field(
+        default=None, max_length=500, description="用户填写的反馈原因，可选。"
+    )
+
+    @field_validator("reason")
+    @classmethod
+    def normalize_reason(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        return value or None
+
+
+class ProjectTraceFeedbackRead(BaseModel):
+    """项目轨迹反馈结果。"""
+
+    id: UUID = Field(description="项目轨迹 ID。")
+    feedback: Literal["up", "down"] | None = Field(description="当前用户反馈。")
+    review_status: str = Field(description="复核状态：none、pending 或 resolved。")
+    feedback_at: datetime | None = Field(description="最近一次反馈时间。")
+
+
 class ProjectTraceCompletionRequest(BaseModel):
     """外部项目回答完成后回填轨迹；检索记录缺失时按此内容补建轨迹。"""
 
@@ -300,9 +345,7 @@ class ProjectTraceCompletionRequest(BaseModel):
         default=None, description="项目侧意图识别结果，原样保存。"
     )
     chat_provider: str | None = Field(default=None, max_length=80, description="生成模型供应商。")
-    chat_model_name: str | None = Field(
-        default=None, max_length=200, description="生成模型名称。"
-    )
+    chat_model_name: str | None = Field(default=None, max_length=200, description="生成模型名称。")
     generation_duration_ms: int | None = Field(
         default=None, ge=0, description="答案生成耗时，单位毫秒。"
     )
@@ -353,12 +396,8 @@ class ProjectCreate(BaseModel):
         description="项目标识，仅限字母、数字及 _ . : -，登记后不可修改。",
     )
     display_name: str = Field(min_length=1, max_length=160, description="项目展示名称。")
-    description: str | None = Field(
-        default=None, max_length=1000, description="项目说明，可选。"
-    )
-    retention_days: int = Field(
-        default=90, ge=1, le=3650, description="轨迹保留天数，默认 90 天。"
-    )
+    description: str | None = Field(default=None, max_length=1000, description="项目说明，可选。")
+    retention_days: int = Field(default=90, ge=1, le=3650, description="轨迹保留天数，默认 90 天。")
 
     @field_validator("project_key")
     @classmethod
@@ -403,6 +442,12 @@ class ProjectTraceRead(BaseModel):
         description="轨迹状态：running、success、no_results、failed 或 clarification。"
     )
     answer_mode: str | None = Field(description="回答路径。")
+    feedback: Literal["up", "down"] | None = Field(description="用户反馈：up 有帮助、down 无帮助。")
+    feedback_reason: str | None = Field(description="用户填写的反馈原因。")
+    feedback_at: datetime | None = Field(description="最近一次反馈时间。")
+    review_status: Literal["none", "pending", "resolved"] = Field(
+        description="复核状态：none 未复核、pending 待补资料、resolved 已补充。"
+    )
     intent: dict[str, Any] = Field(description="意图识别结果。")
     chat_provider: str | None = Field(description="生成模型供应商。")
     chat_model_name: str | None = Field(description="生成模型名称。")
@@ -488,6 +533,8 @@ class AdminDailyTrendRead(BaseModel):
     qa_total: int = Field(description="当日问答记录总数。")
     qa_success: int = Field(description="当日成功记录数。")
     avg_total_duration_ms: int | None = Field(description="当日平均总耗时毫秒；无数据时为空。")
+    prompt_tokens: int = Field(default=0, description="当日已记录的输入 token 数。")
+    completion_tokens: int = Field(default=0, description="当日已记录的输出 token 数。")
     total_tokens: int = Field(default=0, description="当日已记录的生成 token 总数。")
 
 
@@ -497,10 +544,94 @@ class AdminTokenUsageRead(BaseModel):
     prompt_tokens: int = Field(description="累计输入 token 数。")
     completion_tokens: int = Field(description="累计输出 token 数。")
     total_tokens: int = Field(description="累计 token 总数。")
-    recent_prompt_tokens: int = Field(description="近 14 天输入 token 数。")
-    recent_completion_tokens: int = Field(description="近 14 天输出 token 数。")
-    recent_total_tokens: int = Field(description="近 14 天 token 总数。")
+    recent_prompt_tokens: int = Field(description="统计窗口内输入 token 数。")
+    recent_completion_tokens: int = Field(description="统计窗口内输出 token 数。")
+    recent_total_tokens: int = Field(description="统计窗口内 token 总数。")
     measured_qa_count: int = Field(description="已记录 token 用量的问答条数。")
+
+
+class AdminLatencyStatsRead(BaseModel):
+    """统计窗口内 RAG 问答耗时分布（毫秒）；FAQ 直出不计入，各字段只统计已记录对应耗时的记录。"""
+
+    sample_count: int = Field(description="已记录总耗时的 RAG 问答条数（不含 FAQ 直出）。")
+    retrieval_p50_ms: int | None = Field(description="检索耗时中位数；无数据时为空。")
+    retrieval_p90_ms: int | None = Field(description="检索耗时 P90；无数据时为空。")
+    generation_p50_ms: int | None = Field(description="生成耗时中位数；无数据时为空。")
+    generation_p90_ms: int | None = Field(description="生成耗时 P90；无数据时为空。")
+    total_p50_ms: int | None = Field(description="总耗时中位数；无数据时为空。")
+    total_p90_ms: int | None = Field(description="总耗时 P90；无数据时为空。")
+    total_max_ms: int | None = Field(description="总耗时最大值；无数据时为空。")
+
+
+class AdminLatencyBreakdownRead(BaseModel):
+    """按生成模型或知识库分组的统计窗口内 RAG 问答表现；FAQ 直出不计入。"""
+
+    key: str = Field(description="分组标识；模型未记录的记录归入空字符串分组。")
+    label: str = Field(description="分组展示名称。")
+    qa_total: int = Field(description="分组内 RAG 问答条数（不含 FAQ 直出）。")
+    qa_failed: int = Field(description="分组内失败条数（status=failed）。")
+    failure_rate: float = Field(description="失败率百分比，保留两位小数。")
+    avg_total_duration_ms: int | None = Field(description="平均总耗时毫秒；无耗时数据时为空。")
+    p90_total_duration_ms: int | None = Field(description="总耗时 P90；无耗时数据时为空。")
+
+
+class AdminRecentStatisticsRead(BaseModel):
+    """统计窗口内问答质量与耗时概览；时间窗口与 daily_trend 一致。
+
+    质量计数包含 FAQ 直出；耗时与分组统计排除 FAQ 直出（未调用聊天模型）。
+    """
+
+    qa_total: int = Field(description="窗口内问答条数（含 FAQ 直出）。")
+    qa_success: int = Field(description="窗口内成功条数。")
+    qa_no_results: int = Field(description="窗口内未命中条数。")
+    qa_failed: int = Field(description="窗口内失败条数。")
+    failure_rate: float = Field(description="失败率百分比，保留两位小数。")
+    no_result_rate: float = Field(description="未命中率百分比，保留两位小数。")
+    latency: AdminLatencyStatsRead = Field(description="整体耗时分布，不含 FAQ 直出。")
+    models: list[AdminLatencyBreakdownRead] = Field(
+        description="按生成模型分组，不含 FAQ 直出，按条数降序。"
+    )
+    knowledge_bases: list[AdminLatencyBreakdownRead] = Field(
+        description="按知识库分组，不含 FAQ 直出，按条数降序。"
+    )
+
+
+class AdminStatisticsRangeRead(BaseModel):
+    """统计窗口边界（UTC 日期，含首尾两天），用于前端标注与回显。"""
+
+    start: str = Field(description="窗口起始日期，格式 YYYY-MM-DD（UTC）。")
+    end: str = Field(description="窗口结束日期，格式 YYYY-MM-DD（UTC）。")
+    days: int = Field(description="窗口天数（含首尾）。")
+
+
+class AdminModelCostRead(BaseModel):
+    """统计窗口内某个生成模型的 token 与费用；未配置单价的模型 priced=false。"""
+
+    model_name: str = Field(description="生成模型名；未记录的记录归入空字符串。")
+    provider: str | None = Field(description="模型供应商；未记录时为空。")
+    qa_count: int = Field(description="该模型在窗口内已记录 token 的问答条数。")
+    prompt_tokens: int = Field(description="输入 token 数。")
+    completion_tokens: int = Field(description="输出 token 数。")
+    input_cost: float = Field(description="输入 token 费用（元）。")
+    output_cost: float = Field(description="输出 token 费用（元）。")
+    total_cost: float = Field(description="该模型费用合计（元）。")
+    priced: bool = Field(description="是否已配置单价；未配置时费用按 0 计。")
+
+
+class AdminCostRead(BaseModel):
+    """问答生成成本：按已配置的模型单价核算 token 费用，币种人民币。
+
+    FAQ 直出与未记录 token 的记录不计入；单价按当前配置实时计算，
+    调整单价后历史金额会随之变化。
+    """
+
+    currency: str = Field(description="币种，固定 CNY。")
+    recent_cost: float = Field(description="统计窗口内已定价记录的费用合计（元）。")
+    total_cost: float = Field(description="全部历史已定价记录的费用合计（元）。")
+    recent_priced_tokens: int = Field(description="窗口内已定价记录的 token 数。")
+    recent_unpriced_tokens: int = Field(description="窗口内未配置单价记录的 token 数。")
+    unpriced_models: list[str] = Field(description="窗口内出现但未配置单价的模型名。")
+    models: list[AdminModelCostRead] = Field(description="窗口内按模型分组的费用，费用高的在前。")
 
 
 class AdminStatisticsRead(BaseModel):
@@ -514,7 +645,55 @@ class AdminStatisticsRead(BaseModel):
     qa_by_status: dict[str, int] = Field(description="问答记录按状态分布。")
     review_pending: int = Field(description="待补资料复核数。")
     token_usage: AdminTokenUsageRead = Field(description="问答生成模型 token 用量汇总。")
-    daily_trend: list[AdminDailyTrendRead] = Field(description="近 14 天每日问答趋势。")
+    cost: AdminCostRead = Field(description="问答生成成本核算（按模型单价计算，币种人民币）。")
+    range: AdminStatisticsRangeRead = Field(description="本次统计窗口（UTC 日期，含首尾）。")
+    recent: AdminRecentStatisticsRead = Field(description="窗口内质量与耗时概览。")
+    daily_trend: list[AdminDailyTrendRead] = Field(description="窗口内每日问答趋势，缺失日期补零。")
+
+
+class AdminTaskCountsRead(BaseModel):
+    """任务中心各状态数量；统计范围与本次筛选一致（不含状态过滤）。"""
+
+    queued: int = Field(description="排队中的任务数。")
+    running: int = Field(description="进行中的任务数。")
+    failed: int = Field(description="失败待处理的任务数（含已取消）。")
+    done_today: int = Field(description="UTC 当日已完成的任务数。")
+
+
+class AdminTaskRead(BaseModel):
+    """任务中心的一条任务：入库、FAQ 生成或检索评测的归一化视图。"""
+
+    kind: Literal["ingest", "faq", "evaluation"] = Field(
+        description="任务类型：ingest 入库、faq FAQ 生成、evaluation 检索评测。"
+    )
+    task_id: UUID = Field(description="任务记录 ID（入库任务 / Outbox 事件 / 评测运行）。")
+    status: Literal["queued", "running", "failed", "cancelled", "success"] = Field(
+        description="归一化状态；success 仅保留当日完成的记录。"
+    )
+    title: str = Field(description="任务对象名称：文档名或评测集名称。")
+    detail: str | None = Field(description="补充说明：版本、阶段、进度等。")
+    company_id: UUID | None = Field(description="所属公司 ID；无公司时为空。")
+    company_name: str | None = Field(description="所属公司名称。")
+    knowledge_base_id: UUID | None = Field(description="所属知识库 ID。")
+    knowledge_base_name: str | None = Field(description="所属知识库名称。")
+    document_id: UUID | None = Field(description="关联文档 ID，用于重试或跳转。")
+    attempts: int = Field(description="已尝试次数。")
+    progress_current: int | None = Field(default=None, description="已完成子任务数；仅评测有。")
+    progress_total: int | None = Field(default=None, description="子任务总数；仅评测有。")
+    created_at: datetime = Field(description="任务创建时间。")
+    started_at: datetime | None = Field(description="开始时间；未开始为空。")
+    finished_at: datetime | None = Field(description="结束时间；未结束为空。")
+    duration_ms: int | None = Field(description="已耗时毫秒；无开始时间时为空。")
+    error_message: str | None = Field(description="可展示的失败摘要。")
+
+
+class AdminTaskListRead(BaseModel):
+    """任务中心列表；按进行中、排队、失败、完成的优先级排序。"""
+
+    items: list[AdminTaskRead] = Field(description="任务列表，最多 300 条。")
+    counts: AdminTaskCountsRead = Field(description="各状态数量，不受状态过滤影响。")
+    truncated: bool = Field(description="是否因 300 条上限被截断。")
+    generated_at: datetime = Field(description="本次查询时间，供前端展示刷新时刻。")
 
 
 class AdminPromptRead(BaseModel):
@@ -623,15 +802,9 @@ class CompanyRead(BaseModel):
     name: str = Field(description="公司名称。")
     description: str | None = Field(description="公司说明。")
     status: str = Field(description="公司状态：active 或 archived。")
-    credential_count: int = Field(
-        default=0, description="已签发的访问凭据数量，含已停用凭据。"
-    )
-    active_credential_count: int = Field(
-        default=0, description="启用中的访问凭据数量。"
-    )
-    has_vector_library: bool = Field(
-        default=False, description="公司是否已创建向量大库。"
-    )
+    credential_count: int = Field(default=0, description="已签发的访问凭据数量，含已停用凭据。")
+    active_credential_count: int = Field(default=0, description="启用中的访问凭据数量。")
+    has_vector_library: bool = Field(default=False, description="公司是否已创建向量大库。")
     created_at: datetime = Field(description="创建时间。")
     updated_at: datetime = Field(description="最后更新时间。")
 
@@ -641,9 +814,7 @@ class CompanyCredentialCreate(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    name: str = Field(
-        min_length=1, max_length=120, description="项目或用途标识，例如“问诊助手”。"
-    )
+    name: str = Field(min_length=1, max_length=120, description="项目或用途标识，例如“问诊助手”。")
 
     @field_validator("name")
     @classmethod
@@ -675,12 +846,18 @@ class CompanyCredentialIssued(BaseModel):
     token_type: Literal["Bearer"] = "Bearer"
 
 
+AdminRole = Literal["admin", "operator", "viewer"]
+
+
 class AdminCredentialCreate(BaseModel):
     """创建管理员凭据的请求参数。"""
 
     model_config = ConfigDict(extra="forbid")
 
     name: str = Field(min_length=1, max_length=120, description="管理员标识，例如姓名或用途。")
+    role: AdminRole = Field(
+        default="admin", description="角色：admin 全权、operator 运营、viewer 只读。"
+    )
 
     @field_validator("name")
     @classmethod
@@ -696,7 +873,10 @@ class AdminCredentialPatch(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    is_enabled: bool = Field(description="是否启用；停用后该 Token 对新请求立即失效。")
+    is_enabled: bool | None = Field(
+        default=None, description="是否启用；停用后该 Token 对新请求立即失效。"
+    )
+    role: AdminRole | None = Field(default=None, description="调整凭据角色。")
 
 
 class AdminCredentialRead(BaseModel):
@@ -706,9 +886,45 @@ class AdminCredentialRead(BaseModel):
 
     id: UUID = Field(description="凭据 ID。")
     name: str = Field(description="管理员标识。")
+    role: AdminRole = Field(description="角色：admin 全权、operator 运营、viewer 只读。")
     is_enabled: bool = Field(description="是否启用。")
     created_at: datetime = Field(description="创建时间。")
     updated_at: datetime = Field(description="最后更新时间。")
+
+
+class AdminMeRead(BaseModel):
+    """当前管理员身份；管理页据此决定菜单与写操作入口。"""
+
+    name: str = Field(description="管理员标识。")
+    role: AdminRole = Field(description="当前角色。")
+    credential_id: UUID | None = Field(description="凭据 ID；环境引导 Token 为空。")
+    is_bootstrap: bool = Field(description="是否使用 .env 环境引导 Token。")
+
+
+class AuditLogRead(BaseModel):
+    """一条管理端写操作审计记录。"""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID = Field(description="日志 ID。")
+    actor_name: str = Field(description="操作者名称快照。")
+    actor_role: str = Field(description="操作者角色快照。")
+    credential_id: UUID | None = Field(description="凭据 ID；环境引导 Token 为空。")
+    method: str = Field(description="HTTP 方法。")
+    path: str = Field(description="请求路径，不含查询串。")
+    status_code: int = Field(description="响应状态码。")
+    duration_ms: int = Field(description="处理耗时（毫秒）。")
+    client_ip: str | None = Field(description="客户端 IP。")
+    created_at: datetime = Field(description="操作时间（UTC）。")
+
+
+class AuditLogListResponse(BaseModel):
+    """审计日志分页列表。"""
+
+    page: int = Field(description="当前页码。")
+    page_size: int = Field(description="每页记录数。")
+    total: int = Field(description="符合条件的记录总数。")
+    items: list[AuditLogRead] = Field(description="审计记录。")
 
 
 class AdminCredentialIssued(BaseModel):
@@ -751,9 +967,7 @@ class ModelProviderPreset(BaseModel):
         default=None,
         description="OCR 调用模式：自动判断、视觉对话、PaddleOCR 同步接口或百度异步任务。",
     )
-    known_ocr_models: list[str] = Field(
-        default_factory=list, description="该厂商常见 OCR 模型名。"
-    )
+    known_ocr_models: list[str] = Field(default_factory=list, description="该厂商常见 OCR 模型名。")
 
 
 class ModelProfileWrite(ModelProfileSpec):
@@ -822,6 +1036,38 @@ class ModelProfileTestRead(BaseModel):
     )
 
 
+class ModelPriceWrite(BaseModel):
+    """生成模型计费单价（人民币/百万 token）；按模型名唯一，可覆盖已有单价。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    model_name: str = Field(min_length=1, max_length=200, description="供应商模型名。")
+    provider: str | None = Field(default=None, max_length=80, description="供应商，仅用于展示。")
+    input_price_per_million: Decimal = Field(
+        ge=0,
+        max_digits=12,
+        decimal_places=6,
+        description="输入 token 单价（元/百万 token）。",
+    )
+    output_price_per_million: Decimal = Field(
+        ge=0,
+        max_digits=12,
+        decimal_places=6,
+        description="输出 token 单价（元/百万 token）。",
+    )
+
+
+class ModelPriceRead(BaseModel):
+    """已配置的生成模型单价。"""
+
+    id: UUID = Field(description="单价记录 ID。")
+    model_name: str = Field(description="供应商模型名。")
+    provider: str | None = Field(description="供应商；未填写时为空。")
+    input_price_per_million: float = Field(description="输入 token 单价（元/百万 token）。")
+    output_price_per_million: float = Field(description="输出 token 单价（元/百万 token）。")
+    updated_at: datetime = Field(description="最后更新时间。")
+
+
 class ModelUsageItemRead(BaseModel):
     """某一调用位置上实际生效的模型；环境模型没有档案 ID。"""
 
@@ -851,9 +1097,7 @@ class ModelUsageSlotRead(BaseModel):
 class ModelUsageRead(BaseModel):
     """知识库内部全部模型调用位置总览。"""
 
-    slots: list[ModelUsageSlotRead] = Field(
-        description="按向量化、重排、生成、OCR 顺序排列。"
-    )
+    slots: list[ModelUsageSlotRead] = Field(description="按向量化、重排、生成、OCR 顺序排列。")
 
 
 class VectorLibraryCreate(BaseModel):
@@ -1323,3 +1567,293 @@ class FaqListResponse(BaseModel):
     page_size: int = Field(description="每页条数。")
     total: int = Field(description="符合条件的条目总数。")
     items: list[FaqRead] = Field(description="FAQ 条目。")
+
+
+class EvaluationSetCreate(BaseModel):
+    """创建检索评测集。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    knowledge_base_id: UUID = Field(description="待评测的知识库 ID。")
+    name: str = Field(min_length=1, max_length=160, description="评测集名称，同一知识库内唯一。")
+    description: str | None = Field(default=None, max_length=1000, description="评测集说明。")
+
+    @field_validator("name")
+    @classmethod
+    def normalize_name(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("评测集名称不能为空")
+        return value
+
+    @field_validator("description")
+    @classmethod
+    def normalize_description(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        return value or None
+
+
+class EvaluationSetUpdate(BaseModel):
+    """修改评测集名称或说明。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str | None = Field(default=None, min_length=1, max_length=160)
+    description: str | None = Field(default=None, max_length=1000)
+
+
+class EvaluationCaseCreate(BaseModel):
+    """新增评测用例；文档 ID 与关键词至少填写一项。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    query: str = Field(min_length=1, max_length=4000, description="用户问题。")
+    expected_document_ids: list[UUID] = Field(
+        default_factory=list, max_length=50, description="期望命中的文档 ID 列表。"
+    )
+    expected_keywords: list[str] = Field(
+        default_factory=list, max_length=20, description="期望出现在召回正文中的关键词。"
+    )
+    retrieval_mode: Literal["hybrid", "bm25", "vector"] = Field(
+        default="hybrid", description="本次用例使用的检索模式。"
+    )
+    top_k: int = Field(default=5, ge=1, le=20, description="本次用例的召回条数。")
+    is_enabled: bool = Field(default=True, description="是否参与评测。")
+    notes: str | None = Field(default=None, max_length=1000, description="用例备注。")
+
+    @field_validator("query")
+    @classmethod
+    def normalize_query(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("问题不能为空")
+        return value
+
+    @field_validator("expected_keywords")
+    @classmethod
+    def normalize_keywords(cls, value: list[str]) -> list[str]:
+        keywords = [item.strip() for item in value if item and item.strip()]
+        deduplicated = list(dict.fromkeys(keywords))
+        if any(len(item) > 100 for item in deduplicated):
+            raise ValueError("单个关键词不能超过 100 个字符")
+        return deduplicated
+
+    @field_validator("notes")
+    @classmethod
+    def normalize_notes(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        return value or None
+
+    @model_validator(mode="after")
+    def require_expected_source(self) -> "EvaluationCaseCreate":
+        if not self.expected_document_ids and not self.expected_keywords:
+            raise ValueError("expected_document_ids 与 expected_keywords 至少填写一项")
+        return self
+
+
+class EvaluationCaseUpdate(BaseModel):
+    """修改评测用例；未传字段保持原值。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    query: str | None = Field(default=None, min_length=1, max_length=4000)
+    expected_document_ids: list[UUID] | None = Field(default=None, max_length=50)
+    expected_keywords: list[str] | None = Field(default=None, max_length=20)
+    retrieval_mode: Literal["hybrid", "bm25", "vector"] | None = None
+    top_k: int | None = Field(default=None, ge=1, le=20)
+    is_enabled: bool | None = None
+    notes: str | None = Field(default=None, max_length=1000)
+
+    @field_validator("query", "notes")
+    @classmethod
+    def strip_text(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        return value or None
+
+    @field_validator("expected_keywords")
+    @classmethod
+    def normalize_keywords(cls, value: list[str] | None) -> list[str] | None:
+        if value is None:
+            return None
+        keywords = list(dict.fromkeys(item.strip() for item in value if item and item.strip()))
+        if any(len(item) > 100 for item in keywords):
+            raise ValueError("单个关键词不能超过 100 个字符")
+        return keywords
+
+
+class EvaluationCaseBulkCreate(BaseModel):
+    """批量导入评测用例。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[EvaluationCaseCreate] = Field(
+        min_length=1, max_length=500, description="待导入的用例，最多 500 条。"
+    )
+
+
+class EvaluationCaseRead(BaseModel):
+    """评测用例视图。"""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID = Field(description="用例 ID。")
+    set_id: UUID = Field(description="所属评测集 ID。")
+    query: str = Field(description="用户问题。")
+    expected_document_ids: list[UUID] = Field(description="期望命中的文档 ID。")
+    expected_keywords: list[str] = Field(description="期望命中的正文关键词。")
+    retrieval_mode: str = Field(description="检索模式。")
+    top_k: int = Field(description="召回条数。")
+    is_enabled: bool = Field(description="是否参与评测。")
+    notes: str | None = Field(description="用例备注。")
+    created_at: datetime = Field(description="创建时间。")
+    updated_at: datetime = Field(description="最后更新时间。")
+
+
+class EvaluationMetricsRead(BaseModel):
+    """评测汇总指标；比例为 0 到 1，耗时为毫秒。"""
+
+    case_count: int = Field(default=0, description="参与评测的用例数。")
+    completed_count: int = Field(default=0, description="已完成检索的用例数。")
+    errored_count: int = Field(default=0, description="检索报错的用例数。")
+    hit_rate: float = Field(default=0, description="top_k 内至少命中一条期望资料的比例。")
+    recall_at_k: float = Field(default=0, description="期望文档在 top_k 内的平均召回比例。")
+    mrr: float = Field(default=0, description="第一个相关结果倒数排名的平均值。")
+    no_result_rate: float = Field(default=0, description="没有任何召回结果的用例比例。")
+    avg_latency_ms: int = Field(default=0, description="单条检索平均耗时，单位毫秒。")
+
+
+class EvaluationRunRead(BaseModel):
+    """评测运行摘要。"""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID = Field(description="运行 ID。")
+    set_id: UUID = Field(description="所属评测集 ID。")
+    knowledge_base_id: UUID = Field(description="评测知识库 ID。")
+    company_id: UUID | None = Field(description="所属公司 ID。")
+    status: Literal["running", "success", "failed"] = Field(description="运行状态。")
+    case_count: int = Field(description="参与评测的用例数。")
+    completed_count: int = Field(description="已完成的用例数。")
+    metrics: EvaluationMetricsRead = Field(description="汇总指标。")
+    error_message: str | None = Field(description="运行级失败摘要。")
+    started_at: datetime = Field(description="开始时间。")
+    finished_at: datetime | None = Field(description="完成时间；进行中为空。")
+    created_at: datetime = Field(description="创建时间。")
+    knowledge_base_name: str | None = Field(default=None, description="知识库名称。")
+    set_name: str | None = Field(default=None, description="评测集名称。")
+
+
+class EvaluationCaseResultRead(BaseModel):
+    """单条用例的评测结果。"""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID = Field(description="结果 ID。")
+    case_id: UUID | None = Field(description="原用例 ID；用例删除后为空。")
+    query: str = Field(description="评测时的问题快照。")
+    retrieval_mode: str = Field(description="评测时的检索模式。")
+    top_k: int = Field(description="评测时的召回条数。")
+    hit: bool = Field(description="top_k 内是否命中期望资料。")
+    first_relevant_rank: int | None = Field(description="第一个相关结果的排名；未命中时为空。")
+    recall: float = Field(description="本用例召回率。")
+    reciprocal_rank: float = Field(description="本用例倒数排名。")
+    result_count: int = Field(description="实际召回条数。")
+    duration_ms: int | None = Field(description="检索耗时，单位毫秒。")
+    matches: list[dict[str, Any]] = Field(description="召回结果摘要。")
+    error_message: str | None = Field(description="单条用例失败摘要。")
+
+
+class EvaluationBaselineRead(BaseModel):
+    """同评测集上一次成功运行的基线。"""
+
+    id: UUID = Field(description="基线运行 ID。")
+    finished_at: datetime | None = Field(description="基线完成时间。")
+    metrics: EvaluationMetricsRead = Field(description="基线指标。")
+
+
+class EvaluationRunDetail(EvaluationRunRead):
+    """评测运行详情：逐条结果与同集基线。"""
+
+    results: list[EvaluationCaseResultRead] = Field(description="逐条用例结果。")
+    baseline: EvaluationBaselineRead | None = Field(description="同集上一次成功运行；没有时为空。")
+
+
+class EvaluationRunListResponse(BaseModel):
+    """分页返回评测运行。"""
+
+    page: int = Field(description="当前页码。")
+    page_size: int = Field(description="每页记录数。")
+    total: int = Field(description="符合条件的记录总数。")
+    items: list[EvaluationRunRead] = Field(description="运行摘要。")
+
+
+class EvaluationSetRead(BaseModel):
+    """评测集摘要。"""
+
+    id: UUID = Field(description="评测集 ID。")
+    knowledge_base_id: UUID = Field(description="所属知识库 ID。")
+    company_id: UUID | None = Field(description="知识库所属公司 ID。")
+    company_name: str | None = Field(description="公司名称。")
+    knowledge_base_name: str = Field(description="知识库名称。")
+    name: str = Field(description="评测集名称。")
+    description: str | None = Field(description="评测集说明。")
+    case_count: int = Field(description="用例总数。")
+    enabled_case_count: int = Field(description="启用中的用例数。")
+    last_run: EvaluationRunRead | None = Field(description="最近一次运行；没有时为空。")
+    created_at: datetime = Field(description="创建时间。")
+    updated_at: datetime = Field(description="最后更新时间。")
+
+
+class EvaluationSetListResponse(BaseModel):
+    """评测集列表。"""
+
+    items: list[EvaluationSetRead] = Field(description="评测集摘要。")
+
+
+class EvaluationCaseListResponse(BaseModel):
+    """评测集详情及其用例。"""
+
+    set: EvaluationSetRead = Field(description="评测集摘要。")
+    items: list[EvaluationCaseRead] = Field(description="评测用例。")
+
+class GlobalSearchHit(BaseModel):
+    """全局搜索的一条命中；标题与摘要由服务端截取，前端只负责高亮。"""
+
+    kind: Literal[
+        "knowledge_base", "document", "faq", "qa_record", "project_trace", "product"
+    ] = Field(description="命中资源类型。")
+    id: UUID = Field(description="资源 ID；产品目录条目为其自身 ID。")
+    title: str = Field(description="主要展示文本，通常是命中的名称或问题。")
+    snippet: str | None = Field(default=None, description="正文摘要；无正文时为空。")
+    subtitle: str | None = Field(
+        default=None, description="归属说明，例如「公司 · 知识库」或型号。"
+    )
+    status: str | None = Field(default=None, description="资源状态或回答路径等短标签。")
+    knowledge_base_id: UUID | None = Field(
+        default=None, description="跳转用的知识库 ID；产品目录命中为空。"
+    )
+    created_at: datetime | None = Field(default=None, description="创建时间（UTC）。")
+
+
+class GlobalSearchGroup(BaseModel):
+    """按资源类型分组的一组命中。"""
+
+    kind: Literal[
+        "knowledge_base", "document", "faq", "qa_record", "project_trace", "product"
+    ] = Field(description="资源类型。")
+    total: int = Field(description="该类型命中的总数，不受 limit 截断影响。")
+    items: list[GlobalSearchHit] = Field(description="命中的前若干条。")
+
+
+class GlobalSearchRead(BaseModel):
+    """全局搜索结果；分组顺序固定，便于前端稳定排版。"""
+
+    q: str = Field(description="本次检索词（已去首尾空白）。")
+    took_ms: int = Field(description="服务端检索耗时（毫秒）。")
+    groups: list[GlobalSearchGroup] = Field(description="按类型的命中分组。")

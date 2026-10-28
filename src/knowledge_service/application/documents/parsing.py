@@ -10,6 +10,7 @@ import json
 import mimetypes
 import re
 import shutil
+import statistics
 import subprocess
 import tempfile
 import zipfile
@@ -36,6 +37,10 @@ from knowledge_service.infrastructure.ocr_client import (
 
 class DocumentParseError(ValueError):
     """文档无法安全解析，或需要尚未配置的 OCR 服务。"""
+
+
+# PDF 原生表格检测中，单元格超过该长度基本是版面外框而非真表格。
+_PDF_TABLE_MAX_CELL_CHARS = 300
 
 
 def _ocr_configured(settings: Any) -> bool:
@@ -81,9 +86,12 @@ class ParsedBlock:
 
 def _asset_marker(content: bytes, name: str, source: str, **location: Any) -> str:
     """为图片生成与解析顺序无关的稳定占位符。"""
-    identity = content + name.encode() + source.encode() + json.dumps(
-        location, sort_keys=True, ensure_ascii=False
-    ).encode()
+    identity = (
+        content
+        + name.encode()
+        + source.encode()
+        + json.dumps(location, sort_keys=True, ensure_ascii=False).encode()
+    )
     return f"[[KB_ASSET:{hashlib.sha256(identity).hexdigest()[:32]}]]"
 
 
@@ -138,7 +146,8 @@ def parse_document(filename: str, content: bytes) -> list[ParsedBlock]:
             block = replace(
                 block,
                 content=marker,
-                metadata=block.metadata | {
+                metadata=block.metadata
+                | {
                     "asset_marker": marker,
                     "asset_description": description,
                     "reading_order": index,
@@ -162,11 +171,7 @@ def _add_section_path_metadata(blocks: list[ParsedBlock]) -> list[ParsedBlock]:
         if isinstance(raw_path, (list, tuple)):
             path = [str(part).strip() for part in raw_path if str(part).strip()]
         else:
-            path = [
-                part.strip()
-                for part in str(block.section or "").split(" / ")
-                if part.strip()
-            ]
+            path = [part.strip() for part in str(block.section or "").split(" / ") if part.strip()]
         if not path:
             previous_path = []
             previous_ids = []
@@ -378,9 +383,7 @@ def _parse_markdown(content: bytes) -> list[ParsedBlock]:
         cells = _markdown_table_cells(line)
         if cells is not None:
             # 表格行 + 分隔行才构成 GFM 表格；仅一行带竖线的文本按正文处理。
-            next_cells = (
-                _markdown_table_cells(lines[index + 1]) if index + 1 < len(lines) else None
-            )
+            next_cells = _markdown_table_cells(lines[index + 1]) if index + 1 < len(lines) else None
             if next_cells is not None and _is_markdown_table_delimiter(next_cells):
                 flush()
                 rows = [cells]
@@ -395,9 +398,7 @@ def _parse_markdown(content: bytes) -> list[ParsedBlock]:
                 blocks.append(
                     ParsedBlock(
                         kind="table",
-                        content="\n".join(
-                            [header, *(" | ".join(row) for row in rows[1:])]
-                        ),
+                        content="\n".join([header, *(" | ".join(row) for row in rows[1:])]),
                         section=" / ".join(x[1] for x in headings) or None,
                         metadata={"table_header": header},
                     )
@@ -662,8 +663,7 @@ def _parse_xlsx(content: bytes) -> list[ParsedBlock]:
         for worksheet in workbook.worksheets:
             # 在图片锚点处理完之前保留空行，防止原始行号发生偏移。
             rows = [
-                _normalize_table_row(values)
-                for values in worksheet.iter_rows(values_only=True)
+                _normalize_table_row(values) for values in worksheet.iter_rows(values_only=True)
             ]
             table_assets: list[ParsedAsset] = []
             # Excel 图片通常是浮动对象，通过 anchor 记录左上角所在的行列。
@@ -766,9 +766,7 @@ def _parse_pptx(content: bytes) -> list[ParsedBlock]:
         for shape in slide.shapes:
             if getattr(shape, "shape_type", None) == 13 and getattr(shape, "image", None):
                 image = shape.image
-                image_name = str(
-                    getattr(image, "filename", None) or f"image-{slide_number}.png"
-                )
+                image_name = str(getattr(image, "filename", None) or f"image-{slide_number}.png")
                 image_jobs.append(
                     (
                         bytes(image.blob),
@@ -821,9 +819,10 @@ def _parse_pptx(content: bytes) -> list[ParsedBlock]:
                             metadata={"slide_number": slide_number},
                         )
                     )
-            elif getattr(shape, "shape_type", None) == 13 and getattr(
-                shape, "image", None
-            ) is not None:
+            elif (
+                getattr(shape, "shape_type", None) == 13
+                and getattr(shape, "image", None) is not None
+            ):
                 blocks.extend(
                     _parse_office_image(
                         bytes(shape.image.blob),
@@ -851,7 +850,9 @@ def _parse_office_image(
 ) -> list[ParsedBlock]:
     """统一保存 Office 原图；视觉说明只作为独立的召回信息。"""
     asset = _describe_office_image(
-        content, name, media_type,
+        content,
+        name,
+        media_type,
         {
             "source": f"{source}_embedded_image",
             "page": page_number,
@@ -876,9 +877,7 @@ def _parse_office_image(
 def _office_ocr_settings(settings: Any) -> Any:
     """复制配置并单独设置 Office 图片 OCR 超时，不影响 PDF OCR 超时。"""
     result = copy.copy(settings)
-    result.ocr_timeout_seconds = float(
-        getattr(settings, "ocr_embedded_timeout_seconds", 60)
-    )
+    result.ocr_timeout_seconds = float(getattr(settings, "ocr_embedded_timeout_seconds", 60))
     return result
 
 
@@ -892,10 +891,16 @@ def _describe_office_image(
     """识别 Office 图片并返回带原图和来源位置的资产对象。"""
     settings = get_settings()
     digest = hashlib.sha256(content).hexdigest()
-    marker = _asset_marker(content, name, str(metadata.get("source", "office")), **{
-        key: value for key, value in metadata.items()
-        if key in {"row", "column", "page", "slide", "paragraph", "inline_order"}
-    })
+    marker = _asset_marker(
+        content,
+        name,
+        str(metadata.get("source", "office")),
+        **{
+            key: value
+            for key, value in metadata.items()
+            if key in {"row", "column", "page", "slide", "paragraph", "inline_order"}
+        },
+    )
     description = description_cache.get(digest) if description_cache is not None else None
     if description is not None:
         return ParsedAsset(
@@ -944,9 +949,7 @@ def _should_ocr_embedded_image(content: bytes, media_type: str, settings: Any) -
         with Image.open(io.BytesIO(content)) as image:
             return image.width >= int(
                 getattr(settings, "ocr_embedded_image_min_width", 128)
-            ) and image.height >= int(
-                getattr(settings, "ocr_embedded_image_min_height", 128)
-            )
+            ) and image.height >= int(getattr(settings, "ocr_embedded_image_min_height", 128))
     except Exception:
         # 无法确认尺寸时不把二进制 Office 图形送给图片接口。
         return False
@@ -1038,9 +1041,7 @@ def _prewarm_office_image_descriptions(
                     description_cache.pop(digest, None)
 
 
-def _prewarm_docx_image_descriptions(
-    document: Any, description_cache: dict[str, str]
-) -> None:
+def _prewarm_docx_image_descriptions(document: Any, description_cache: dict[str, str]) -> None:
     """收集 DOCX 关系图片后交给统一的小批量识别器。"""
     images = [
         (
@@ -1107,12 +1108,15 @@ def _layout_blocks(
                 image_doc = fitz.open(stream=page_image, filetype="pdf")
                 page = image_doc[(page_number or 1) - 1]
                 x0, y0, x1, y1 = item.bbox
-                rect = fitz.Rect(
-                    page.rect.width * x0 / 1000,
-                    page.rect.height * y0 / 1000,
-                    page.rect.width * x1 / 1000,
-                    page.rect.height * y1 / 1000,
-                ) & page.rect
+                rect = (
+                    fitz.Rect(
+                        page.rect.width * x0 / 1000,
+                        page.rect.height * y0 / 1000,
+                        page.rect.width * x1 / 1000,
+                        page.rect.height * y1 / 1000,
+                    )
+                    & page.rect
+                )
                 if not rect.is_empty:
                     asset_content = page.get_pixmap(clip=rect, alpha=False).tobytes("png")
                 image_doc.close()
@@ -1343,9 +1347,7 @@ def _parse_epub(content: bytes) -> list[ParsedBlock]:
                 ):
                     blocks.append(block)
                     continue
-                section = (
-                    f"{chapter_title} / {block_section}" if block_section else chapter_title
-                )
+                section = f"{chapter_title} / {block_section}" if block_section else chapter_title
                 blocks.append(replace(block, section=section))
         return blocks
     except DocumentParseError:
@@ -1609,9 +1611,20 @@ def _parse_pdf(content: bytes) -> list[ParsedBlock]:
             )
             blocks.extend(page_blocks)
             _sync_pdf_heading_state(headings_state, page_blocks)
-        native_image_blocks = _pdf_native_image_blocks(content, page_texts, native_text_by_page)
+        vision_images = (
+            _pdf_vision_image_regions(
+                content, settings, page_texts, exclude_pages=set(layout_pages)
+            )
+            if layout_mode == "auto"
+            else {}
+        )
+        native_image_blocks = _pdf_native_image_blocks(
+            content, page_texts, native_text_by_page, vision_images=vision_images
+        )
         if native_image_blocks:
             blocks = native_image_blocks
+        # 带文字层的 PDF 走本地解析，矢量线框表格不会被 pypdf 还原，需要额外补检。
+        blocks = _apply_pdf_native_tables(blocks, _pdf_native_table_blocks(content))
     except DocumentParseError:
         raise
     except OcrServiceError as exc:
@@ -1623,9 +1636,7 @@ def _parse_pdf(content: bytes) -> list[ParsedBlock]:
     return blocks
 
 
-def _sync_pdf_heading_state(
-    headings: list[tuple[int, str]], blocks: list[ParsedBlock]
-) -> None:
+def _sync_pdf_heading_state(headings: list[tuple[int, str]], blocks: list[ParsedBlock]) -> None:
     """Carry the last explicit chapter path into the next PDF page."""
     section = next((block.section for block in reversed(blocks) if block.section), None)
     if section:
@@ -1666,9 +1677,7 @@ def _pdf_plain_text_blocks(
         candidate = _clean_text(part)
         if not candidate:
             continue
-        inferred = (
-            _safe_inferred_heading_level(candidate) if "\n" not in candidate else None
-        )
+        inferred = _safe_inferred_heading_level(candidate) if "\n" not in candidate else None
         if inferred is not None:
             headings[:] = [entry for entry in headings if entry[0] < inferred]
             headings.append((inferred, candidate))
@@ -1683,9 +1692,140 @@ def _pdf_plain_text_blocks(
     return blocks
 
 
-def _pdf_native_text_blocks(
-    content: bytes, page_texts: list[str]
-) -> dict[int, list[ParsedBlock]]:
+def _pdf_column_gutters(blocks: list[dict[str, Any]]) -> list[float]:
+    """用行级 x 跨度找纵向装订线；行很少跨栏，比块级 bbox 更可靠。"""
+    boxes = [
+        tuple(float(value) for value in line.get("bbox") or (0, 0, 0, 0))
+        for block in blocks
+        if block.get("type") == 0
+        for line in block.get("lines", [])
+    ]
+    if len(boxes) < 2:
+        return []
+    heights = [box[3] - box[1] for box in boxes]
+    min_gap = max(12.0, statistics.median(heights) * 1.2)
+    merged: list[list[float]] = []
+    for x0, _, x1, _ in sorted(boxes):
+        if merged and x0 <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], x1)
+        else:
+            merged.append([x0, x1])
+    return [
+        (previous[1] + following[0]) / 2
+        for previous, following in zip(merged, merged[1:], strict=False)
+        if following[0] - previous[1] >= min_gap
+    ]
+
+
+def _pdf_split_cross_column_blocks(
+    blocks: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """按行级装订线拆开跨栏文本块，否则不同面板的句子会被拼进同一个块。"""
+    gutters = _pdf_column_gutters(blocks)
+    if not gutters:
+        return blocks
+    result: list[dict[str, Any]] = []
+    for block in blocks:
+        lines = [line for line in block.get("lines", []) if line.get("spans") and line.get("bbox")]
+        if block.get("type") != 0 or len(lines) < 2:
+            result.append(block)
+            continue
+        columns: dict[int, list[dict[str, Any]]] = {}
+        for line in lines:
+            x0, _, x1, _ = line["bbox"]
+            column = sum(1 for gutter in gutters if (x0 + x1) / 2 > gutter)
+            columns.setdefault(column, []).append(line)
+        if len(columns) <= 1:
+            result.append(block)
+            continue
+        for column_lines in columns.values():
+            boxes = [line["bbox"] for line in column_lines]
+            result.append(
+                {
+                    **block,
+                    "bbox": (
+                        min(box[0] for box in boxes),
+                        min(box[1] for box in boxes),
+                        max(box[2] for box in boxes),
+                        max(box[3] for box in boxes),
+                    ),
+                    "lines": sorted(
+                        column_lines, key=lambda line: (line["bbox"][1], line["bbox"][0])
+                    ),
+                }
+            )
+    return result
+
+
+def _pdf_reading_order(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """用 XY-cut 还原多栏版面阅读顺序；单栏文档结果与按坐标排序一致。"""
+    if len(blocks) <= 1:
+        return list(blocks)
+    items = [
+        (block, tuple(float(value) for value in (block.get("bbox") or (0, 0, 0, 0))))
+        for block in blocks
+    ]
+    heights = [box[3] - box[1] for _, box in items]
+    # 行距通常在字高的 1.2 倍以内，超过即视为分栏或分块留白。
+    min_gap = max(12.0, statistics.median(heights) * 1.2)
+    ordered: list[tuple[dict[str, Any], tuple[float, ...]]] = []
+    _pdf_xycut(items, min_gap, ordered)
+    return [block for block, _ in ordered]
+
+
+def _pdf_xycut(
+    items: list[tuple[dict[str, Any], tuple[float, ...]]],
+    min_gap: float,
+    out: list[tuple[dict[str, Any], tuple[float, ...]]],
+) -> None:
+    """递归切分：先按纵向装订线分栏，再按水平留白分行，最后按坐标兜底。"""
+    if len(items) <= 1:
+        out.extend(items)
+        return
+    columns = _pdf_gap_groups(items, 0, min_gap)
+    if len(columns) > 1:
+        for column in columns:
+            _pdf_xycut(column, min_gap, out)
+        return
+    rows = _pdf_gap_groups(items, 1, min_gap)
+    if len(rows) > 1:
+        for row in rows:
+            _pdf_xycut(row, min_gap, out)
+        return
+    out.extend(sorted(items, key=lambda item: (item[1][1], item[1][0])))
+
+
+def _pdf_gap_groups(
+    items: list[tuple[dict[str, Any], tuple[float, ...]]],
+    axis: int,
+    min_gap: float,
+) -> list[list[tuple[dict[str, Any], tuple[float, ...]]]]:
+    """按指定轴上的大留白分组，留白宽度至少为 min_gap。"""
+    low, high = (0, 2) if axis == 0 else (1, 3)
+    spans = sorted(((box[low], box[high]) for _, box in items), key=lambda span: span[0])
+    merged: list[list[float]] = []
+    for start, end in spans:
+        if merged and start <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    gaps = [
+        (previous[1] + following[0]) / 2
+        for previous, following in zip(merged, merged[1:], strict=False)
+        if following[0] - previous[1] >= min_gap
+    ]
+    if not gaps:
+        return [items]
+    groups: list[list[tuple[dict[str, Any], tuple[float, ...]]]] = [
+        [] for _ in range(len(gaps) + 1)
+    ]
+    for item in items:
+        center = (item[1][low] + item[1][high]) / 2
+        groups[sum(1 for gap in gaps if center > gap)].append(item)
+    return [group for group in groups if group]
+
+
+def _pdf_native_text_blocks(content: bytes, page_texts: list[str]) -> dict[int, list[ParsedBlock]]:
     """Use PDF span typography and coordinates to infer conservative heading levels."""
     try:
         import fitz
@@ -1698,7 +1838,8 @@ def _pdf_native_text_blocks(
         all_sizes: list[float] = []
         for page_number, page in enumerate(document, start=1):
             records = []
-            for reading_order, block in enumerate(page.get_text("dict").get("blocks", [])):
+            page_blocks = _pdf_split_cross_column_blocks(page.get_text("dict").get("blocks", []))
+            for reading_order, block in enumerate(page_blocks):
                 if block.get("type") != 0:
                     continue
                 lines = block.get("lines", [])
@@ -1729,7 +1870,7 @@ def _pdf_native_text_blocks(
                         "reading_order": reading_order,
                     }
                 )
-            records.sort(key=lambda item: (item["bbox"][1], item["bbox"][0]))
+            records = _pdf_reading_order(records)
             page_records[page_number] = records
 
         if not all_sizes:
@@ -1745,6 +1886,9 @@ def _pdf_native_text_blocks(
         for records in page_records.values():
             for record_index, record in enumerate(records):
                 text = record["text"]
+                # 纯数字/符号块是步骤号、页码或色标，不能当标题，否则会重置章节层级。
+                if not re.search(r"[A-Za-z\u4e00-\u9fff]", text):
+                    continue
                 if (
                     record["line_count"] > 2
                     or len(text) > 120
@@ -1752,6 +1896,9 @@ def _pdf_native_text_blocks(
                 ):
                     continue
                 numbered_level = _heading_level(text) if "\n" not in text else None
+                if record["line_count"] > 1 and numbered_level is None:
+                    # 多行块多是相邻面板被合并的产物，按字号判标题会污染章节路径。
+                    continue
                 numbered_subsection = bool(
                     re.match(r"^\s*\d{1,3}[.．]\d", text)
                     or re.match(r"^\s*[（(][一二三四五六七八九十百千万]+[）)]", text)
@@ -1806,9 +1953,7 @@ def _pdf_native_text_blocks(
                             "format": "pdf_native",
                             "reading_order": record["reading_order"],
                             "bbox": record["bbox"],
-                            "heading_level": headings[-1][0]
-                            if is_heading and headings
-                            else None,
+                            "heading_level": headings[-1][0] if is_heading and headings else None,
                         },
                     )
                 )
@@ -1822,12 +1967,102 @@ def _pdf_native_text_blocks(
         document.close()
 
 
+# 视觉模型返回的图片区域达到该尺寸才算示意图；电源键、箭头等小图标不进资产。
+_VISION_IMAGE_MIN_WIDTH = 80.0
+_VISION_IMAGE_MIN_HEIGHT = 60.0
+_VISION_IMAGE_MIN_AREA = 9000.0
+
+
+def _pdf_vision_image_regions(
+    content: bytes,
+    settings: Any,
+    page_texts: list[str],
+    exclude_pages: set[int],
+) -> dict[int, list[tuple[list[float], bytes]]]:
+    """用视觉模型定位文字层页面上的矢量示意图并裁剪为 PNG。
+
+    只有「有文字、无位图、有矢量绘制」的页面需要这一步：位图走原生提取，
+    纯文字页无需视觉识别；失败时返回空字典，本地解析结果保持不变。
+    """
+    if not getattr(settings, "ocr_layout_analysis_enabled", False) or not _ocr_configured(settings):
+        return {}
+    try:
+        import fitz
+
+        document = fitz.open(stream=content, filetype="pdf")
+    except Exception:
+        return {}
+    try:
+        candidates: list[int] = []
+        for page_number, page in enumerate(document, start=1):
+            if page_number in exclude_pages or not page_texts[page_number - 1]:
+                continue
+            raw_blocks = page.get_text("dict").get("blocks", [])
+            if any(block.get("type") == 1 and block.get("image") for block in raw_blocks):
+                continue
+            if not page.get_drawings():
+                continue
+            candidates.append(page_number)
+        if not candidates:
+            return {}
+        layouts = analyze_pdf_pages(
+            content,
+            settings=settings,
+            filename="document.pdf",
+            page_numbers=candidates,
+        )
+        regions: dict[int, list[tuple[list[float], bytes]]] = {}
+        for page_number, layout in layouts.items():
+            page = document[page_number - 1]
+            kept: list[Any] = []
+            for block in layout.blocks:
+                if block.kind != "image" or not block.bbox:
+                    continue
+                x0, y0, x1, y1 = block.bbox
+                rect = (
+                    fitz.Rect(
+                        page.rect.width * x0 / 1000,
+                        page.rect.height * y0 / 1000,
+                        page.rect.width * x1 / 1000,
+                        page.rect.height * y1 / 1000,
+                    )
+                    & page.rect
+                )
+                if (
+                    rect.is_empty
+                    or rect.width < _VISION_IMAGE_MIN_WIDTH
+                    or rect.height < _VISION_IMAGE_MIN_HEIGHT
+                    or rect.get_area() < _VISION_IMAGE_MIN_AREA
+                    # 与已保留区域重叠超过自身七成视为重复检测，丢弃小者。
+                    or any((rect & other).get_area() > rect.get_area() * 0.7 for other in kept)
+                ):
+                    continue
+                png = page.get_pixmap(clip=rect, alpha=False).tobytes("png")
+                if png:
+                    kept.append(rect)
+                    regions.setdefault(page_number, []).append(
+                        ([rect.x0, rect.y0, rect.x1, rect.y1], png)
+                    )
+        return regions
+    except OcrServiceError:
+        return {}
+    except Exception:
+        return {}
+    finally:
+        document.close()
+
+
 def _pdf_native_image_blocks(
     content: bytes,
     page_texts: list[str],
     native_text_by_page: dict[int, list[ParsedBlock]] | None = None,
+    vision_images: dict[int, list[tuple[list[float], bytes]]] | None = None,
 ) -> list[ParsedBlock]:
-    """按 PDF 原生文字块和图片坐标重建阅读顺序，避免有文字层的图片被漏掉。"""
+    """按 PDF 原生文字块和图片坐标重建阅读顺序，避免有文字层的图片被漏掉。
+
+    vision_images 提供视觉模型定位的矢量示意图（页码 -> [(页面坐标 bbox, PNG)]），
+    与原生位图一起按坐标插入阅读顺序；纯文字页不会被重建。
+    """
     try:
         import fitz
 
@@ -1840,9 +2075,25 @@ def _pdf_native_image_blocks(
         images: list[tuple[bytes, str, str]] = []
         for page_number, page in enumerate(document, start=1):
             raw_blocks = page.get_text("dict").get("blocks", [])
-            if not any(block.get("type") == 1 and block.get("image") for block in raw_blocks):
+            page_vision = (vision_images or {}).get(page_number) or []
+            if (
+                not any(block.get("type") == 1 and block.get("image") for block in raw_blocks)
+                and not page_vision
+            ):
                 continue
-            page_data.append((page_number, page, raw_blocks))
+            # 矢量示意图伪装成原生位图块，复用按坐标重建阅读顺序的逻辑。
+            for bbox, png_bytes in page_vision:
+                raw_blocks.append(
+                    {
+                        "type": 1,
+                        "bbox": list(bbox),
+                        "ext": "png",
+                        "image": png_bytes,
+                        "width": max(1, int(bbox[2] - bbox[0])),
+                        "height": max(1, int(bbox[3] - bbox[1])),
+                    }
+                )
+            page_data.append((page_number, page, _pdf_split_cross_column_blocks(raw_blocks)))
             for block in raw_blocks:
                 if block.get("type") != 1 or not block.get("image"):
                     continue
@@ -1855,13 +2106,7 @@ def _pdf_native_image_blocks(
         _prewarm_office_image_descriptions(images, descriptions, "pdf")
         by_page: dict[int, list[ParsedBlock]] = {}
         for page_number, page, raw_blocks in page_data:
-            ordered = sorted(
-                raw_blocks,
-                key=lambda block: (
-                    float((block.get("bbox") or (0, 0, 0, 0))[1]),
-                    float((block.get("bbox") or (0, 0, 0, 0))[0]),
-                ),
-            )
+            ordered = _pdf_reading_order(raw_blocks)
             output: list[ParsedBlock] = []
             native_text_found = False
             page_text_blocks = native_text_by_page.get(page_number, [])
@@ -1933,9 +2178,7 @@ def _pdf_native_image_blocks(
                         order=reading_order,
                         bbox=normalized_bbox,
                     )
-                    description = descriptions.get(
-                        hashlib.sha256(image_bytes).hexdigest(), ""
-                    )
+                    description = descriptions.get(hashlib.sha256(image_bytes).hexdigest(), "")
                     output.append(
                         ParsedBlock(
                             kind="text",
@@ -1974,3 +2217,108 @@ def _pdf_native_image_blocks(
         return []
     finally:
         document.close()
+
+
+def _pdf_native_table_blocks(
+    content: bytes,
+) -> dict[int, list[tuple[list[float], ParsedBlock]]]:
+    """用 PyMuPDF 的矢量线框检测补回带文字层 PDF 的表格，按页返回（原图坐标 + 表格块）。"""
+    try:
+        import fitz
+
+        document = fitz.open(stream=content, filetype="pdf")
+    except Exception:
+        return {}
+    try:
+        result: dict[int, list[tuple[list[float], ParsedBlock]]] = {}
+        for page_number, page in enumerate(document, start=1):
+            try:
+                found = page.find_tables()
+            except Exception:
+                continue
+            entries: list[tuple[list[float], ParsedBlock]] = []
+            for table in getattr(found, "tables", None) or []:
+                rows = [
+                    [_clean_text(str(cell or "").replace("\n", " ")) for cell in row]
+                    for row in table.extract()
+                ]
+                rows = [row for row in rows if any(row)]
+                if len(rows) < 2 or max((len(cells) for cells in rows), default=0) < 2:
+                    # 单行/单列的多半是带边框的提示框，交回正文处理。
+                    continue
+                # 版面外框也会被误判成表格，其单元格通常是一整段正文；真表格单元格都很短。
+                if max(len(cell) for cells in rows for cell in cells) > _PDF_TABLE_MAX_CELL_CHARS:
+                    continue
+                block = _table_block(rows, section="", metadata={"format": "pdf_native_table"})
+                if block is None:
+                    continue
+                bbox = [float(value) for value in table.bbox]
+                entries.append((bbox, replace(block, page_number=page_number)))
+            if entries:
+                result[page_number] = entries
+        return result
+    except Exception:
+        return {}
+    finally:
+        document.close()
+
+
+def _table_index_for_block(
+    block: ParsedBlock, entries: list[tuple[list[float], ParsedBlock]]
+) -> int | None:
+    """返回正文块中心落入的表格下标；非正文或无法定位时返回 None。"""
+    if block.kind != "text" or not entries:
+        return None
+    bbox = block.metadata.get("bbox")
+    if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+        return None
+    try:
+        center_x = (float(bbox[0]) + float(bbox[2])) / 2
+        center_y = (float(bbox[1]) + float(bbox[3])) / 2
+    except (TypeError, ValueError):
+        return None
+    for index, (table_bbox, _) in enumerate(entries):
+        x0, y0, x1, y1 = table_bbox
+        # 留 1pt 容差，避免紧贴边框的行被判为表外而重复。
+        if x0 - 1 <= center_x <= x1 + 1 and y0 - 1 <= center_y <= y1 + 1:
+            return index
+    return None
+
+
+def _apply_pdf_native_tables(
+    blocks: list[ParsedBlock],
+    tables_by_page: dict[int, list[tuple[list[float], ParsedBlock]]],
+) -> list[ParsedBlock]:
+    """把本地检测到的表格替换进块流，并抑制表格区域内的重复正文块。"""
+    if not tables_by_page:
+        return blocks
+    output: list[ParsedBlock] = []
+    current_section: str | None = None
+    index = 0
+    total = len(blocks)
+    while index < total:
+        page_number = blocks[index].page_number
+        page_end = index
+        while page_end < total and blocks[page_end].page_number == page_number:
+            page_end += 1
+        entries = tables_by_page.get(page_number) if page_number is not None else None
+        emitted: set[int] = set()
+        for block in blocks[index:page_end]:
+            table_index = _table_index_for_block(block, entries or [])
+            if table_index is not None:
+                if table_index not in emitted:
+                    emitted.add(table_index)
+                    table_block = entries[table_index][1]
+                    output.append(
+                        replace(table_block, section=current_section or table_block.section)
+                    )
+                continue
+            if block.section:
+                current_section = block.section
+            output.append(block)
+        # 表格区域没有正文块可覆盖时补在页尾，避免整表丢失。
+        for table_index, (_, table_block) in enumerate(entries or []):
+            if table_index not in emitted:
+                output.append(replace(table_block, section=current_section or table_block.section))
+        index = page_end
+    return output

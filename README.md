@@ -17,7 +17,9 @@
 
 独立部署的管理员环境 Token `KNOWLEDGE_SERVICE_AUTH_ADMIN_TOKEN` 必须非空，否则业务请求返回 `503`（即使已有公司凭据），健康检查公开。公司 Token 不再从环境映射读取：服务端每请求查询 `company_credentials` 的 SHA-256 哈希，每家公司可按项目签发多枚凭据并独立重置或停用，无鉴权缓存。旧 `KNOWLEDGE_SERVICE_AUTH_COMPANY_TOKENS` 已彻底不再支持，已有公司需由管理员重新签发。
 
-`main.py` 独立入口挂载 `require_service_auth`，业务请求携带 `Authorization: Bearer <Token>`。管理员可跨公司管理，创建公司、旧版 `POST /knowledge-bases` 及公司凭据管理仅限管理员；公司 Token 只能操作状态为 `active` 的本公司及其全部子库、文档、图片、QA 记录和公司大库，不是子库级权限。**同一公司的多枚凭据共享全部公司权限，按项目分开发放只便于独立撤销，不构成项目级数据隔离。** 缺失/无效/停用/被替换的 Token 返回 `401`，显式跨公司参数或归档公司旧有效凭据返回 `403`，外公司资源 ID 返回 `404`。
+`main.py` 独立入口挂载 `require_service_auth`，业务请求携带 `Authorization: Bearer <Token>`。管理员侧按角色区分：`admin` 全权，`operator` 可创建公司与知识库并读写业务数据，`viewer` 只读；公司凭据管理、模型档案/单价、提示词与审计仅限 `admin`。公司 Token 只能操作状态为 `active` 的本公司及其全部子库、文档、图片、QA 记录和公司大库，不是子库级权限。**同一公司的多枚凭据共享全部公司权限，按项目分开发放只便于独立撤销，不构成项目级数据隔离。** 缺失/无效/停用/被替换的 Token 返回 `401`，显式跨公司参数或归档公司旧有效凭据返回 `403`，外公司资源 ID 返回 `404`。
+
+库内管理员凭据分三档角色：`admin` 全权、`operator` 运营（业务数据可读写，不能管理凭据、模型配置、提示词与审计）、`viewer` 只读；`.env` 引导 Token 固定为 `admin`。管理端写操作会写入 `audit_logs`（操作者快照、方法、路径、状态码、耗时、IP，不含请求体），保留 180 天；审计查询与导出仅 `admin` 可读。详见 [接口文档](API_DOCUMENTATION.md)。
 
 真实数据库迁移及实际 `.env` 更新仍待核对目标与备份，本文不表示已执行。确认 `KNOWLEDGE_SERVICE_DATABASE_URL` 指向预期数据库并备份后，再从 `E:\llmpython\knowledge_base` 执行以下部署步骤；迁移 `0025_multi_company_credentials` 会把 `0014_company_credentials` 建立的单凭据表升级为多凭据表，已有 Token 原样保留并标记为「默认凭据」，不需要客户端换 Token。
 
@@ -42,11 +44,11 @@ uv run python main.py
 
 服务监听 `.env` 中的 `KNOWLEDGE_SERVICE_HOST` 和 `KNOWLEDGE_SERVICE_PORT`：代码默认端口 `8000`，当前本机及模板端口为 `8333`，API 地址为 `http://127.0.0.1:8333/api/v1`，接口文档为 `/docs`。
 
-### test_agent 远程接入
+### health_manager_ai 远程接入
 
-客户端不变：配置 `KNOWLEDGE_SERVICE_URL` 为上述实际 API 地址；`KNOWLEDGE_SERVICE_TOKEN` 必须填管理员按项目签发的对应公司 Token，严禁填管理员 Token。多个项目共用一家公司时，为每个项目单独签发凭据，便于只撤销其中一个；它们的数据权限仍完全相同。同时配置真实 `KNOWLEDGE_SERVICE_COMPANY_ID` 和 `KNOWLEDGE_SERVICE_KNOWLEDGE_BASE_IDS`（`source -> 子库 UUID` 映射），不要用占位 UUID。默认来源须有映射，并设置 `CHAT_KNOWLEDGE_RETRIEVAL_ENABLED=true`（默认关闭），修改后重启 `test_agent`；重置某枚凭据后须更新对应客户端 Token 并重启。
+客户端不变：配置 `KNOWLEDGE_SERVICE_URL` 为上述实际 API 地址；`KNOWLEDGE_SERVICE_TOKEN` 必须填管理员按项目签发的对应公司 Token，严禁填管理员 Token。多个项目共用一家公司时，为每个项目单独签发凭据，便于只撤销其中一个；它们的数据权限仍完全相同。同时配置真实 `KNOWLEDGE_SERVICE_COMPANY_ID` 和 `KNOWLEDGE_SERVICE_KNOWLEDGE_BASE_IDS`（`source -> 子库 UUID` 映射），不要用占位 UUID。默认来源须有映射，并设置 `CHAT_KNOWLEDGE_RETRIEVAL_ENABLED=true`（默认关闭），修改后重启 `health_manager_ai`；重置某枚凭据后须更新对应客户端 Token 并重启。
 
-`test_agent` 只按 `source` 映射调用 `/knowledge-bases/{knowledge_base_id}/search?company_id={company_id}`，公司 ID 放 Query、子库 ID 放路径，不调用 `/ask`。列表 `GET /api/v1/knowledge-bases` 同样必填公司 UUID，只返回该公司 `active` 子库并先过滤后分页（`offset=0`、`limit=50`，最大 `200`）；管理员查询未知公司返回空数组，公司 Token 不得冒用其他公司 ID。
+`health_manager_ai` 只按 `source` 映射调用 `/knowledge-bases/{knowledge_base_id}/search?company_id={company_id}`，公司 ID 放 Query、子库 ID 放路径，不调用 `/ask`。列表 `GET /api/v1/knowledge-bases` 同样必填公司 UUID，只返回该公司 `active` 子库并先过滤后分页（`offset=0`、`limit=50`，最大 `200`）；管理员查询未知公司返回空数组，公司 Token 不得冒用其他公司 ID。
 
 ## 在宿主项目中运行
 

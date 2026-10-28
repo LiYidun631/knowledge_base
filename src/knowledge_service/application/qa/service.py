@@ -7,15 +7,39 @@ from uuid import UUID, uuid4
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from knowledge_service.infrastructure.persistence.models import (
+    ProjectQaTrace,
     QAEvent,
     QARecord,
     QASession,
     QASource,
+    utc_now,
 )
 
 
 class QASessionKnowledgeBaseMismatch(ValueError):
     """调用方传入的会话不属于当前知识库。"""
+
+
+def apply_feedback(
+    record: QARecord | ProjectQaTrace,
+    *,
+    feedback: str | None,
+    reason: str | None,
+) -> None:
+    """写入用户反馈；点踩时把未复核记录自动加入待补资料列表。
+
+    回复与撤销都不会覆盖已标记的复核状态，避免管理员处理进度被用户改判覆盖。
+    """
+    if feedback is None:
+        record.feedback = None
+        record.feedback_reason = None
+        record.feedback_at = None
+        return
+    record.feedback = feedback
+    record.feedback_reason = reason
+    record.feedback_at = utc_now()
+    if feedback == "down" and record.review_status == "none":
+        record.review_status = "pending"
 
 
 async def start_qa_record(
@@ -101,9 +125,7 @@ def add_qa_event(
     )
 
 
-def save_qa_sources(
-    session: AsyncSession, record: QARecord, results: Iterable[Any]
-) -> int:
+def save_qa_sources(session: AsyncSession, record: QARecord, results: Iterable[Any]) -> int:
     """保存本次检索结果的来源快照，保证原文删除后仍可审计历史回答。"""
     count = 0
     for rank, result in enumerate(results, start=1):

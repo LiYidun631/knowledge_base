@@ -5,14 +5,17 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Path, Query, Request, status
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from knowledge_service.api.v1.schemas import (
+    FeedbackWrite,
     KnowledgeSearchRequest,
     KnowledgeSearchResponse,
     KnowledgeSearchResult,
     ProjectTraceCompletionRead,
     ProjectTraceCompletionRequest,
+    ProjectTraceFeedbackRead,
     SearchAsset,
     SearchContextItem,
     SearchScores,
@@ -29,6 +32,7 @@ from knowledge_service.application.project_traces import (
     complete_trace,
     record_retrieval,
 )
+from knowledge_service.application.qa.service import apply_feedback
 from knowledge_service.application.search.service import (
     KnowledgeSearchDocumentsInvalid,
     KnowledgeSearchModelUnavailable,
@@ -39,6 +43,7 @@ from knowledge_service.core.config import get_settings
 from knowledge_service.infrastructure.chroma.vector_store import ChromaSearchError
 from knowledge_service.infrastructure.model_providers.embeddings import EmbeddingProviderError
 from knowledge_service.infrastructure.model_providers.rerank import RerankProviderError
+from knowledge_service.infrastructure.persistence.models import AppProject, ProjectQaTrace
 from knowledge_service.infrastructure.persistence.session import get_db_session
 
 router = APIRouter(tags=["知识库在线检索"])
@@ -302,4 +307,60 @@ async def complete_project_trace_endpoint(
         ) from exc
     return ProjectTraceCompletionRead(
         id=trace.id, status=trace.status, finished_at=trace.finished_at
+    )
+
+
+@router.put(
+    "/knowledge-bases/{knowledge_base_id}/project-traces/{external_request_id}/feedback",
+    response_model=ProjectTraceFeedbackRead,
+    summary="回传项目问答反馈",
+    description=(
+        "外部项目把终端用户的点赞或点踩回传到轨迹；点踩会自动把轨迹加入待补资料，"
+        "传 feedback=null 可撤销反馈。项目标识通过 X-Project-Key 请求头传入。"
+    ),
+)
+async def submit_project_trace_feedback(
+    knowledge_base_id: Annotated[UUID, Path(description="检索使用的知识库 ID。")],
+    external_request_id: Annotated[
+        str, Path(min_length=1, max_length=128, description="调用方请求 ID。")
+    ],
+    payload: FeedbackWrite,
+    company_id: Annotated[UUID, Query(description="公司租户 ID；必须与轨迹归属一致。")],
+    project_key: Annotated[
+        str,
+        Header(
+            alias=PROJECT_KEY_HEADER,
+            min_length=1,
+            max_length=80,
+            description="项目标识；与检索请求头 X-Project-Key 一致。",
+        ),
+    ],
+    session: Annotated[AsyncSession, Depends(get_db_session, scope="function")],
+) -> ProjectTraceFeedbackRead:
+    """写入项目轨迹反馈；项目、公司与知识库任一不匹配都返回 404。"""
+    project = await session.scalar(
+        select(AppProject).where(
+            AppProject.project_key == project_key,
+            AppProject.is_enabled.is_(True),
+        )
+    )
+    if project is None:
+        raise HTTPException(status_code=404, detail="项目未登记或已停用")
+    trace = await session.scalar(
+        select(ProjectQaTrace).where(
+            ProjectQaTrace.company_id == company_id,
+            ProjectQaTrace.project_id == project.id,
+            ProjectQaTrace.knowledge_base_id == knowledge_base_id,
+            ProjectQaTrace.external_request_id == external_request_id,
+        )
+    )
+    if trace is None:
+        raise HTTPException(status_code=404, detail="项目轨迹不存在")
+    apply_feedback(trace, feedback=payload.feedback, reason=payload.reason)
+    await session.commit()
+    return ProjectTraceFeedbackRead(
+        id=trace.id,
+        feedback=trace.feedback,
+        review_status=trace.review_status,
+        feedback_at=trace.feedback_at,
     )

@@ -8,7 +8,7 @@ from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response, status
 from fastapi import Path as ApiPath
-from sqlalchemy import delete, func, or_, select
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy import text as sql_text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -131,9 +131,7 @@ def _normalize_product_lists(
         *(model_names or []),
         *([model_name] if model_name and model_name.strip() else []),
     ]
-    products = list(
-        dict.fromkeys(value.strip() for value in merged_products if value.strip())
-    )
+    products = list(dict.fromkeys(value.strip() for value in merged_products if value.strip()))
     models = list(dict.fromkeys(value.strip() for value in merged_models if value.strip()))
     if any(len(value) > 200 for value in [*products, *models]):
         raise HTTPException(
@@ -149,9 +147,7 @@ async def _validate_catalog_labels(
     """上传标签必须已在全局产品目录登记；未传标签的旧式上传不受限。"""
     if not products and not models:
         return
-    rows = await session.execute(
-        select(ProductCatalog.product_name, ProductCatalog.model_name)
-    )
+    rows = await session.execute(select(ProductCatalog.product_name, ProductCatalog.model_name))
     catalog_products: set[str] = set()
     catalog_models: set[str] = set()
     for product_name, model_name in rows:
@@ -507,9 +503,7 @@ async def list_documents(
     for document in documents:
         read = DocumentRead.model_validate(document)
         # 产品标签从元数据推导，供管理页「上传新版本」预填，避免重传时错标。
-        read.product_names, read.model_names = document_product_labels(
-            document.extra_metadata
-        )
+        read.product_names, read.model_names = document_product_labels(document.extra_metadata)
         items.append(read)
     return items
 
@@ -586,18 +580,17 @@ async def delete_document(
     session: Annotated[AsyncSession, Depends(get_db_session, scope="function")],
 ) -> None:
     """完整删除文档，避免数据库、文件目录和向量库残留孤儿数据。"""
-    document = await session.scalar(
-        select(Document)
-        .where(Document.id == document_id)
-    )
+    document = await session.scalar(select(Document).where(Document.id == document_id))
     if document is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
 
-    jobs = list(await session.scalars(
-        select(IngestionJob)
-        .where(IngestionJob.document_id == document_id)
-        .order_by(IngestionJob.id)
-    ))
+    jobs = list(
+        await session.scalars(
+            select(IngestionJob)
+            .where(IngestionJob.document_id == document_id)
+            .order_by(IngestionJob.id)
+        )
+    )
     acquired_locks: list[str] = []
     process_locks: dict[UUID, asyncio.Lock] = {}
     is_mysql = session.get_bind().dialect.name == "mysql"
@@ -628,11 +621,13 @@ async def delete_document(
         )
         if document is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
-        jobs = list(await session.scalars(
-            select(IngestionJob)
-            .where(IngestionJob.document_id == document_id)
-            .order_by(IngestionJob.id)
-        ))
+        jobs = list(
+            await session.scalars(
+                select(IngestionJob)
+                .where(IngestionJob.document_id == document_id)
+                .order_by(IngestionJob.id)
+            )
+        )
         # 上传可能在首次读取任务列表后刚好提交；补锁新任务，避免留下一条竞态窗口。
         for job in jobs:
             if job.id not in process_locks:
@@ -696,9 +691,7 @@ async def delete_document(
             await storage.delete(asset.object_key)
 
         # Outbox 没有直接外键，必须显式删除，防止删除后任务再次被派发。
-        await session.execute(
-            delete(OutboxEvent).where(OutboxEvent.aggregate_id == document_id)
-        )
+        await session.execute(delete(OutboxEvent).where(OutboxEvent.aggregate_id == document_id))
         await session.execute(
             delete(DocumentChunkTerm).where(DocumentChunkTerm.document_id == document_id)
         )
@@ -810,8 +803,7 @@ async def delete_file_vectors(
     response_model=BatchDeleteResponse,
     summary="批量删除文件向量",
     description=(
-        "按后台文件 ID 批量删除指定子库中的向量索引和入库数据。"
-        "后台文件系统中的原文件不受影响。"
+        "按后台文件 ID 批量删除指定子库中的向量索引和入库数据。后台文件系统中的原文件不受影响。"
     ),
 )
 async def batch_delete_file_vectors(
@@ -886,12 +878,8 @@ async def batch_delete_documents(
         )
     # 按请求提交顺序返回删除结果，避免无 ORDER BY 查询导致顺序随机。
     documents_by_id = {document.id: document for document in documents}
-    ordered_documents = [
-        documents_by_id[document_id] for document_id in payload.document_ids
-    ]
-    deleted_ids = await delete_documents(
-        session, [document.id for document in ordered_documents]
-    )
+    ordered_documents = [documents_by_id[document_id] for document_id in payload.document_ids]
+    deleted_ids = await delete_documents(session, [document.id for document in ordered_documents])
     return BatchDeleteResponse(deleted_count=len(deleted_ids), deleted_ids=deleted_ids)
 
 
@@ -966,6 +954,83 @@ async def list_document_versions(
         .order_by(DocumentVersion.version_number.desc())
     )
     return [DocumentVersionRead.model_validate(version) for version in versions]
+
+
+@router.post(
+    "/documents/{document_id}/versions/{document_version_id}/activate",
+    response_model=DocumentVersionRead,
+    summary="切换文档的当前可检索版本（版本回滚）",
+    description=(
+        "把指定历史版本设为当前可检索版本：检索、FAQ 匹配与原文件预览随之切换，"
+        "最新上传版本号保持不变。仅允许入库成功的版本；知识库已归档或文档有进行中的"
+        "入库任务时拒绝。"
+    ),
+)
+async def activate_document_version(
+    document_id: Annotated[UUID, ApiPath(description="逻辑文档 ID。")],
+    document_version_id: Annotated[UUID, ApiPath(description="要激活的文档版本 ID。")],
+    session: Annotated[AsyncSession, Depends(get_db_session, scope="function")],
+) -> DocumentVersionRead:
+    """回滚到指定版本：只翻转 is_current，切块与向量按版本存储，无需重新入库。"""
+    row = (
+        await session.execute(
+            select(Document, KnowledgeBase.status)
+            .join(KnowledgeBase, KnowledgeBase.id == Document.knowledge_base_id)
+            .where(Document.id == document_id)
+        )
+    ).first()
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+    # 回滚不改变最新上传版本号和文档状态，仅需确认知识库仍可写。
+    _, knowledge_base_status = row
+    if knowledge_base_status != "active":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail="知识库已归档，不能切换版本"
+        )
+    version = await session.scalar(
+        select(DocumentVersion)
+        .where(
+            DocumentVersion.id == document_version_id,
+            DocumentVersion.document_id == document_id,
+        )
+        .with_for_update()
+    )
+    if version is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="文档版本不存在")
+    if version.status != "completed":
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="仅可切换到入库成功的版本")
+    # 入库进行中时切换会被入库完成时的回写覆盖，先挡住。
+    busy_jobs = int(
+        await session.scalar(
+            select(func.count())
+            .select_from(IngestionJob)
+            .where(
+                IngestionJob.document_id == document_id,
+                IngestionJob.status.in_(("queued", "running")),
+            )
+        )
+        or 0
+    )
+    if busy_jobs > 0:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="文档有进行中的入库任务，完成后再切换版本",
+        )
+    if version.is_current:
+        return DocumentVersionRead.model_validate(version)
+    # 唯一索引保证每个文档只有一个当前版本，必须先清旧版本再置位。
+    await session.execute(
+        update(DocumentVersion)
+        .where(
+            DocumentVersion.document_id == document_id,
+            DocumentVersion.is_current.is_(True),
+        )
+        .values(is_current=False)
+    )
+    await session.flush()
+    version.is_current = True
+    await session.flush()
+    return DocumentVersionRead.model_validate(version)
 
 
 @router.get(
@@ -1134,9 +1199,7 @@ async def create_document_folder(
             parent_id=payload.parent_id,
         )
     except KnowledgeBaseNotFound as exc:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="知识库不存在"
-        ) from exc
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="知识库不存在") from exc
     except KnowledgeBaseArchived as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail="知识库已归档，不能修改目录"
@@ -1263,9 +1326,7 @@ async def list_document_chunks(
     document_id: Annotated[UUID, ApiPath(description="逻辑文档 ID。")],
     document_version_id: Annotated[UUID, ApiPath(description="要预览的文档版本 ID。")],
     session: Annotated[AsyncSession, Depends(get_db_session, scope="function")],
-    offset: Annotated[
-        int, Query(ge=0, description="跳过的父块数量。")
-    ] = 0,
+    offset: Annotated[int, Query(ge=0, description="跳过的父块数量。")] = 0,
     limit: Annotated[
         int, Query(ge=1, le=500, description="本页最多返回的父块数量，最大为 500。")
     ] = 100,
@@ -1376,11 +1437,32 @@ async def list_document_chunks(
     )
 
 
+async def _resolve_preview_version(
+    session: AsyncSession, document: Document
+) -> DocumentVersion | None:
+    """原文件预览/下载跟随当前可检索版本；尚无可检索版本时回退到最新上传版本。"""
+    version = await session.scalar(
+        select(DocumentVersion).where(
+            DocumentVersion.document_id == document.id,
+            DocumentVersion.is_current.is_(True),
+        )
+    )
+    if version is not None:
+        return version
+    return await session.scalar(
+        select(DocumentVersion).where(
+            DocumentVersion.document_id == document.id,
+            DocumentVersion.version_number == document.latest_version_number,
+        )
+    )
+
+
 @router.get(
     "/documents/{document_id}/file",
-    summary="下载或预览文档最新版本的原文件",
+    summary="下载或预览文档当前版本的原文件",
     description=(
-        "返回最新上传版本的服务端原文件副本。disposition=inline 用于浏览器预览，"
+        "返回当前可检索版本的服务端原文件副本（回滚后指向回滚到的版本）；"
+        "尚无可检索版本时回退到最新上传版本。disposition=inline 用于浏览器预览，"
         "attachment 用于下载；不支持浏览器内渲染的格式（如 Office 文档）会触发下载。"
     ),
 )
@@ -1394,32 +1476,19 @@ async def get_document_file(
 ) -> Response:
     if disposition not in {"inline", "attachment"}:
         raise HTTPException(status_code=422, detail="disposition 只能是 inline 或 attachment")
-    document = await session.scalar(
-        select(Document).where(Document.id == document_id)
-    )
+    document = await session.scalar(select(Document).where(Document.id == document_id))
     if document is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
-    version = await session.scalar(
-        select(DocumentVersion).where(
-            DocumentVersion.document_id == document_id,
-            DocumentVersion.version_number == document.latest_version_number,
-        )
-    )
+    version = await _resolve_preview_version(session, document)
     if version is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="最新版本的原文件不存在"
-        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="当前版本的原文件不存在")
     try:
         content = await get_object_storage(get_settings()).get(version.object_key)
     except Exception as exc:
         logger.exception("Failed to read document file: document_id=%s", document_id)
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="原文件读取失败"
-        ) from exc
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="原文件读取失败") from exc
     quoted_name = version.filename.replace("\\", "").replace('"', "")
-    fallback = (
-        quoted_name.encode("ascii", "replace").decode("ascii").replace("?", "_")
-    )
+    fallback = quoted_name.encode("ascii", "replace").decode("ascii").replace("?", "_")
     content_disposition = (
         f"{disposition}; filename=\"{fallback}\"; filename*=UTF-8''{quote(quoted_name)}"
     )
@@ -1435,8 +1504,9 @@ async def get_document_file(
 
 @router.get(
     "/documents/{document_id}/preview",
-    summary="将文档最新版本转换为浏览器可预览内容",
+    summary="将文档当前版本转换为浏览器可预览内容",
     description=(
+        "按当前可检索版本生成预览（回滚后指向回滚到的版本），无当前版本时回退到最新上传版本；"
         "Office、旧版 Office、RTF、ODF 和 TIFF 由服务端转换为 PDF 或 PNG；"
         "缺少 LibreOffice 时返回 503，前端仍可下载原文件。"
     ),
@@ -1445,32 +1515,19 @@ async def get_document_preview(
     document_id: Annotated[UUID, ApiPath(description="逻辑文档 ID。")],
     session: Annotated[AsyncSession, Depends(get_db_session, scope="function")],
 ) -> Response:
-    document = await session.scalar(
-        select(Document).where(Document.id == document_id)
-    )
+    document = await session.scalar(select(Document).where(Document.id == document_id))
     if document is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
-    version = await session.scalar(
-        select(DocumentVersion).where(
-            DocumentVersion.document_id == document_id,
-            DocumentVersion.version_number == document.latest_version_number,
-        )
-    )
+    version = await _resolve_preview_version(session, document)
     if version is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="最新版本的原文件不存在"
-        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="当前版本的原文件不存在")
     try:
         content = await get_object_storage(get_settings()).get(version.object_key)
     except Exception as exc:
         logger.exception("Failed to read document file: document_id=%s", document_id)
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="原文件读取失败"
-        ) from exc
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="原文件读取失败") from exc
     try:
-        preview = await asyncio.to_thread(
-            build_preview, version.id, version.filename, content
-        )
+        preview = await asyncio.to_thread(build_preview, version.id, version.filename, content)
     except PreviewConverterUnavailable as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
