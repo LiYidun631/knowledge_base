@@ -10,6 +10,7 @@ import DataPanel from '../components/ui/DataPanel.vue'
 import FilterBar from '../components/ui/FilterBar.vue'
 import StatusPill from '../components/ui/StatusPill.vue'
 import EmptyState from '../components/ui/EmptyState.vue'
+import { formatBeijingClock, formatBeijingDateTime } from '../utils/datetime'
 
 interface Company {
   id: string
@@ -231,7 +232,8 @@ async function regenerateFaq(task: TaskItem) {
 
 function formatDateTime(value: string | null): string {
   if (!value) return '—'
-  return value.slice(0, 19).replace('T', ' ')
+  // 库存 UTC，界面按北京时间展示。
+  return formatBeijingDateTime(value)
 }
 
 function formatMs(value: number | null): string {
@@ -242,7 +244,7 @@ function formatMs(value: number | null): string {
 }
 
 function updatedLabel(value: string): string {
-  return value ? value.slice(11, 19) : '—'
+  return value ? formatBeijingClock(value, true) : '—'
 }
 
 function progressPercent(task: TaskItem): number {

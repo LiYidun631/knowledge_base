@@ -8,6 +8,7 @@ import DataPanel from '../components/ui/DataPanel.vue'
 import FilterBar from '../components/ui/FilterBar.vue'
 import StatusPill from '../components/ui/StatusPill.vue'
 import EmptyState from '../components/ui/EmptyState.vue'
+import { formatBeijingDateTime, todayBeijingDateKey } from '../utils/datetime'
 
 interface AuditLogItem {
   id: string
@@ -121,7 +122,8 @@ async function exportCsv() {
     })
     const url = URL.createObjectURL(data)
     const link = document.createElement('a')
-    const stamp = new Date().toISOString().slice(0, 10).replace(/-/g, '')
+    // 文件名用北京时间日期，和表格展示口径一致。
+    const stamp = todayBeijingDateKey().replace(/-/g, '')
     link.href = url
     link.download = `audit-logs-${stamp}.csv`
     link.click()
@@ -139,7 +141,8 @@ function methodTone(method: string): string {
 }
 
 function formatDateTime(value: string): string {
-  return value.slice(0, 19).replace('T', ' ')
+  // 库存 UTC，界面按北京时间展示；筛选参数仍按 UTC 整日边界传。
+  return formatBeijingDateTime(value)
 }
 
 onMounted(() => load())
@@ -150,7 +153,7 @@ onMounted(() => load())
     <PageHeader
       title="审计日志"
       eyebrow="操作留痕"
-      subtitle="只记录管理端写操作（POST / PUT / PATCH / DELETE）· 时间均为 UTC · 保留 180 天"
+      subtitle="只记录管理端写操作（POST / PUT / PATCH / DELETE）· 时间按北京时间展示 · 保留 180 天"
     >
       <template #meta>
         <span class="header-count">共 {{ total.toLocaleString('zh-CN') }} 条</span>
@@ -222,7 +225,7 @@ onMounted(() => load())
             :muted="hasFilters"
           />
         </template>
-        <el-table-column label="时间(UTC)" width="168">
+        <el-table-column label="时间(北京时间)" width="168">
           <template #default="{ row }">
             <span class="mono">{{ formatDateTime(row.created_at) }}</span>
           </template>

@@ -7,6 +7,7 @@ import { client, errorMessage } from '../api/client'
 import { canWrite } from '../api/session'
 import { renderMarkdown } from '../utils/markdown'
 import { resolveInlineImages } from '../utils/assets'
+import { formatBeijingDateTime } from '../utils/datetime'
 import PageHeader from '../components/ui/PageHeader.vue'
 import DataPanel from '../components/ui/DataPanel.vue'
 import FilterBar from '../components/ui/FilterBar.vue'
@@ -389,7 +390,8 @@ async function submitFaq() {
 }
 
 function formatDateTime(value: string): string {
-  return value.slice(0, 19).replace('T', ' ')
+  // 库存 UTC，界面按北京时间展示。
+  return formatBeijingDateTime(value)
 }
 
 function formatMs(value: number | null): string {

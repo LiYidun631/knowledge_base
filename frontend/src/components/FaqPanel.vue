@@ -4,6 +4,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { client, errorMessage } from '../api/client'
 import { canWrite } from '../api/session'
 import { renderMarkdown } from '../utils/markdown'
+import { formatBeijingDateTime } from '../utils/datetime'
 import DataPanel from './ui/DataPanel.vue'
 import FilterBar from './ui/FilterBar.vue'
 import StatusPill from './ui/StatusPill.vue'
@@ -77,7 +78,8 @@ function docName(id: string | null): string {
 }
 
 function formatDateTime(value: string): string {
-  return value.slice(0, 19).replace('T', ' ')
+  // 库存 UTC，界面按北京时间展示。
+  return formatBeijingDateTime(value)
 }
 
 async function load() {

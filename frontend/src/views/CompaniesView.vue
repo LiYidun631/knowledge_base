@@ -7,6 +7,7 @@ import PageHeader from '../components/ui/PageHeader.vue'
 import DataPanel from '../components/ui/DataPanel.vue'
 import StatusPill from '../components/ui/StatusPill.vue'
 import EmptyState from '../components/ui/EmptyState.vue'
+import { formatBeijingDate } from '../utils/datetime'
 
 interface Company {
   id: string
@@ -268,7 +269,8 @@ async function removeCompany(company: Company) {
 }
 
 function formatDate(value: string): string {
-  return value.slice(0, 10)
+  // 库存 UTC，界面按北京时间展示。
+  return formatBeijingDate(value)
 }
 
 onMounted(loadCompanies)

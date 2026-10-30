@@ -7,6 +7,7 @@ import PageHeader from '../components/ui/PageHeader.vue'
 import FilterBar from '../components/ui/FilterBar.vue'
 import StatusPill from '../components/ui/StatusPill.vue'
 import EmptyState from '../components/ui/EmptyState.vue'
+import { formatBeijingDateTime } from '../utils/datetime'
 
 interface Company {
   id: string
@@ -569,7 +570,8 @@ async function removeRun(run: EvaluationRun) {
 }
 
 function formatDateTime(value: string | null): string {
-  return value ? value.slice(0, 19).replace('T', ' ') : '—'
+  // 库存 UTC，界面按北京时间展示。
+  return value ? formatBeijingDateTime(value) : '—'
 }
 
 function percent(value: number | null | undefined): string {

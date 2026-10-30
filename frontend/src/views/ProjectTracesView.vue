@@ -6,6 +6,12 @@ import { client, errorMessage } from '../api/client'
 import { canWrite } from '../api/session'
 import { renderMarkdown } from '../utils/markdown'
 import { resolveInlineImages } from '../utils/assets'
+import {
+  beijingDateKey,
+  formatBeijingClock,
+  formatBeijingDateTime,
+  todayBeijingDateKey,
+} from '../utils/datetime'
 import PageHeader from '../components/ui/PageHeader.vue'
 import DataPanel from '../components/ui/DataPanel.vue'
 import FilterBar from '../components/ui/FilterBar.vue'
@@ -239,7 +245,8 @@ const dayGroups = computed<DayGroup[]>(() => {
   const groups: DayGroup[] = []
   const index = new Map<string, DayGroup>()
   for (const row of rows.value) {
-    const key = row.created_at.slice(0, 10)
+    // 按北京时间分日，和列表展示的口径一致。
+    const key = beijingDateKey(row.created_at)
     let group = index.get(key)
     if (!group) {
       group = { key, label: formatDayLabel(key), items: [] }
@@ -281,31 +288,31 @@ function pad2(value: number): string {
   return String(value).padStart(2, '0')
 }
 
-function localDateKey(date: Date): string {
-  return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`
-}
-
 function formatDayLabel(key: string): string {
   const [year, month, day] = key.split('-').map(Number)
   if (!year || !month || !day) return key
   const date = new Date(year, month - 1, day)
   const weekdays = ['周日', '周一', '周二', '周三', '周四', '周五', '周六']
   const monthDay = `${month}月${day}日`
-  const today = localDateKey(new Date())
-  const yesterday = localDateKey(new Date(Date.now() - 86_400_000))
+  // 「今天/昨天」也按北京时间判断，避免凌晨前后归错组。
+  const today = todayBeijingDateKey()
+  const yesterday = beijingDateKey(new Date(Date.now() - 86_400_000).toISOString())
   if (key === today) return `今天 · ${monthDay}`
   if (key === yesterday) return `昨天 · ${monthDay}`
-  if (year !== new Date().getFullYear()) return `${year}年${monthDay} · ${weekdays[date.getDay()]}`
+  if (year !== Number(today.slice(0, 4))) {
+    return `${year}年${monthDay} · ${weekdays[date.getDay()]}`
+  }
   return `${monthDay} · ${weekdays[date.getDay()]}`
 }
 
 function formatClock(value: string): string {
-  return value.slice(11, 16)
+  // 库存 UTC，界面按北京时间展示。
+  return formatBeijingClock(value, false)
 }
 
 function formatDateTime(value: string | null): string {
   if (!value) return '—'
-  return value.slice(0, 19).replace('T', ' ')
+  return formatBeijingDateTime(value)
 }
 
 function formatMs(value: number | null): string {

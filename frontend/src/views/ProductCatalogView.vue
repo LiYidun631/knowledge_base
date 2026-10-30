@@ -8,6 +8,7 @@ import PageHeader from '../components/ui/PageHeader.vue'
 import DataPanel from '../components/ui/DataPanel.vue'
 import FilterBar from '../components/ui/FilterBar.vue'
 import EmptyState from '../components/ui/EmptyState.vue'
+import { formatBeijingDateTime } from '../utils/datetime'
 
 interface CatalogEntry {
   id: string
@@ -171,7 +172,8 @@ function onSelectionChange(rows: CatalogEntry[]) {
 }
 
 function formatDateTime(value: string): string {
-  return value.slice(0, 19).replace('T', ' ')
+  // 库存 UTC，界面按北京时间展示。
+  return formatBeijingDateTime(value)
 }
 
 onMounted(() => {

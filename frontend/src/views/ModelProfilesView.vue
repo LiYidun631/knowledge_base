@@ -7,6 +7,7 @@ import PageHeader from '../components/ui/PageHeader.vue'
 import DataPanel from '../components/ui/DataPanel.vue'
 import StatusPill from '../components/ui/StatusPill.vue'
 import EmptyState from '../components/ui/EmptyState.vue'
+import { formatBeijingDateTime } from '../utils/datetime'
 
 interface ModelPreset {
   key: string
@@ -308,9 +309,8 @@ function formatPrice(value: number): string {
 }
 
 function formatTime(value: string): string {
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return value
-  return date.toLocaleString('zh-CN', { hour12: false })
+  // 库存 UTC，界面按北京时间展示（不跟随浏览器时区）。
+  return formatBeijingDateTime(value)
 }
 
 function openPriceCreate(modelName = '', provider = '') {

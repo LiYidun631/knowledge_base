@@ -10,6 +10,7 @@ import DataPanel from '../components/ui/DataPanel.vue'
 import FilterBar from '../components/ui/FilterBar.vue'
 import StatusPill from '../components/ui/StatusPill.vue'
 import EmptyState from '../components/ui/EmptyState.vue'
+import { formatBeijingDate } from '../utils/datetime'
 
 interface Company {
   id: string
@@ -111,7 +112,8 @@ function chunkSummary(kb: KnowledgeBase): string {
 }
 
 function formatDate(value: string): string {
-  return value.slice(0, 10)
+  // 库存 UTC，界面按北京时间展示。
+  return formatBeijingDate(value)
 }
 
 async function loadKbs() {

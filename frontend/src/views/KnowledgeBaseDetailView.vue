@@ -12,6 +12,7 @@ import EmptyState from '../components/ui/EmptyState.vue'
 import PageHeader from '../components/ui/PageHeader.vue'
 import StatusPill from '../components/ui/StatusPill.vue'
 import { resolveInlineImages } from '../utils/assets'
+import { formatBeijingDateTime } from '../utils/datetime'
 import { escapeHtml, renderMarkdown } from '../utils/markdown'
 
 interface KbDetail {
@@ -228,7 +229,8 @@ function statusOf(document: DocumentItem) {
 }
 
 function formatDateTime(value: string): string {
-  return value.slice(0, 19).replace('T', ' ')
+  // 库存 UTC，界面按北京时间展示。
+  return formatBeijingDateTime(value)
 }
 
 async function loadFolders() {

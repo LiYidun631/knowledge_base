@@ -1,12 +1,14 @@
 <script setup lang="ts">
-import { onMounted, reactive, ref } from 'vue'
+import { nextTick, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import type { FormInstance, FormRules } from 'element-plus'
 import { client, errorMessage } from '../api/client'
 import { ROLE_LABELS, type AdminRole } from '../api/session'
 import PageHeader from '../components/ui/PageHeader.vue'
 import DataPanel from '../components/ui/DataPanel.vue'
 import StatusPill from '../components/ui/StatusPill.vue'
 import EmptyState from '../components/ui/EmptyState.vue'
+import { formatBeijingDate } from '../utils/datetime'
 
 interface AdminCredential {
   id: string
@@ -49,6 +51,68 @@ const accountDialog = reactive({
   submitting: false,
 })
 
+const createFormRef = ref<FormInstance>()
+const accountFormRef = ref<FormInstance>()
+
+// 规则与后端校验保持一致：账号 3–60 位（不区分大小写），密码 8–128 位。
+const createRules: FormRules = {
+  name: [{ required: true, whitespace: true, message: '请填写管理员标识', trigger: 'blur' }],
+  username: [
+    {
+      trigger: 'blur',
+      validator: (_rule, value: string, callback) => {
+        const account = (value ?? '').trim()
+        if (account && account.length < 3) callback(new Error('登录账号至少 3 个字符'))
+        else callback()
+      },
+    },
+  ],
+  password: [
+    {
+      trigger: 'blur',
+      validator: (_rule, value: string, callback) => {
+        const password = value ?? ''
+        const account = createDialog.username.trim()
+        if (!password) {
+          if (account) callback(new Error('填写登录账号时需同时设置密码'))
+          else callback()
+          return
+        }
+        if (!account) callback(new Error('设置密码前请先填写登录账号'))
+        else if (password.length < 8) callback(new Error('登录密码至少 8 位'))
+        else callback()
+      },
+    },
+  ],
+}
+
+const accountRules: FormRules = {
+  username: [
+    {
+      trigger: 'blur',
+      validator: (_rule, value: string, callback) => {
+        const account = (value ?? '').trim()
+        if (account && account.length < 3) callback(new Error('登录账号至少 3 个字符'))
+        else callback()
+      },
+    },
+  ],
+  password: [
+    {
+      trigger: 'blur',
+      validator: (_rule, value: string, callback) => {
+        const password = value ?? ''
+        const account = accountDialog.username.trim()
+        if (password && password.length < 8) callback(new Error('登录密码至少 8 位'))
+        else if (password && !account) callback(new Error('设置密码前请先填写登录账号'))
+        else if (account && !accountDialog.hasPassword && !password) {
+          callback(new Error('首次开通账号需同时设置密码'))
+        } else callback()
+      },
+    },
+  ],
+}
+
 // 明文 Token 只在内存中保留到弹窗关闭，不写入任何存储或日志。
 const tokenDialog = reactive({
   visible: false,
@@ -75,19 +139,16 @@ function openCreateDialog() {
   createDialog.username = ''
   createDialog.password = ''
   createDialog.visible = true
+  // 清掉上一次关闭时残留的红色提示。
+  nextTick(() => createFormRef.value?.clearValidate())
 }
 
 async function createCredential() {
-  if (!createDialog.name.trim()) {
-    ElMessage.warning('请填写管理员标识')
-    return
-  }
+  // 校验失败时字段下方会显示红色说明，这里不再弹 toast。
+  const valid = await createFormRef.value?.validate().catch(() => false)
+  if (!valid) return
   const username = createDialog.username.trim()
   const password = createDialog.password
-  if (username && !password) {
-    ElMessage.warning('填写登录账号时要同时设置密码')
-    return
-  }
   createDialog.submitting = true
   try {
     const { data } = await client.post<{ admin_credential_id: string; token: string }>(
@@ -117,27 +178,14 @@ function openAccountDialog(credential: AdminCredential) {
   accountDialog.hasPassword = credential.has_password
   accountDialog.hadUsername = Boolean(credential.username)
   accountDialog.visible = true
+  nextTick(() => accountFormRef.value?.clearValidate())
 }
 
 async function saveAccount() {
+  const valid = await accountFormRef.value?.validate().catch(() => false)
+  if (!valid) return
   const username = accountDialog.username.trim()
   const password = accountDialog.password
-  if (username.length > 0 && username.length < 3) {
-    ElMessage.warning('登录账号至少 3 个字符')
-    return
-  }
-  if (password && password.length < 8) {
-    ElMessage.warning('密码至少 8 位')
-    return
-  }
-  if (username && !accountDialog.hasPassword && !password) {
-    ElMessage.warning('填写登录账号时要同时设置密码')
-    return
-  }
-  if (password && !username) {
-    ElMessage.warning('设置密码需要先有登录账号')
-    return
-  }
   const payload: Record<string, string> = {}
   if (username) payload.username = username
   // 清空账号即收回账号密码登录入口。
@@ -239,7 +287,8 @@ async function removeCredential(credential: AdminCredential) {
 }
 
 function formatDate(value: string): string {
-  return value.slice(0, 10)
+  // 库存 UTC，界面按北京时间展示。
+  return formatBeijingDate(value)
 }
 
 onMounted(loadCredentials)
@@ -334,8 +383,14 @@ onMounted(loadCredentials)
       width="440px"
       :close-on-click-modal="false"
     >
-      <el-form label-width="90px">
-        <el-form-item label="管理员标识" required>
+      <el-form
+        ref="createFormRef"
+        :model="createDialog"
+        :rules="createRules"
+        label-width="90px"
+        class="credential-form"
+      >
+        <el-form-item label="管理员标识" prop="name" required>
           <el-input v-model="createDialog.name" maxlength="120" placeholder="例如 张三 / 值班账号" />
         </el-form-item>
         <el-form-item label="角色">
@@ -351,17 +406,19 @@ onMounted(loadCredentials)
             {{ roleOptions.find((option) => option.value === createDialog.role)?.hint }}
           </div>
         </el-form-item>
-        <el-form-item label="登录账号">
+        <el-form-item label="登录账号" prop="username">
           <el-input v-model="createDialog.username" maxlength="60" placeholder="选填，例如 liyidun" />
+          <div class="field-hint">选填 · 3–60 个字符，不区分大小写，统一按小写保存</div>
         </el-form-item>
-        <el-form-item label="登录密码">
+        <el-form-item label="登录密码" prop="password">
           <el-input
             v-model="createDialog.password"
             type="password"
             show-password
             maxlength="128"
-            placeholder="填写账号时必填，至少 8 位"
+            placeholder="填了账号就必须填，至少 8 位"
           />
+          <div class="field-hint">8–128 个字符 · 只保存哈希，不回显</div>
         </el-form-item>
       </el-form>
       <template #footer>
@@ -378,18 +435,26 @@ onMounted(loadCredentials)
       width="440px"
       :close-on-click-modal="false"
     >
-      <el-form label-width="90px">
-        <el-form-item label="登录账号">
+      <el-form
+        ref="accountFormRef"
+        :model="accountDialog"
+        :rules="accountRules"
+        label-width="90px"
+        class="credential-form"
+      >
+        <el-form-item label="登录账号" prop="username">
           <el-input v-model="accountDialog.username" maxlength="60" placeholder="留空即收回账号登录" />
+          <div class="field-hint">留空即收回账号登录 · 3–60 个字符，不区分大小写</div>
         </el-form-item>
-        <el-form-item label="登录密码">
+        <el-form-item label="登录密码" prop="password">
           <el-input
             v-model="accountDialog.password"
             type="password"
             show-password
             maxlength="128"
-            :placeholder="accountDialog.hasPassword ? '留空表示不修改' : '至少 8 位'"
+            :placeholder="accountDialog.hasPassword ? '留空表示不修改' : '首次开通必须填写'"
           />
+          <div class="field-hint">8–128 个字符 · 留空表示不修改</div>
         </el-form-item>
       </el-form>
       <p class="account-hint">
@@ -451,6 +516,17 @@ onMounted(loadCredentials)
   font-size: var(--kb-font-xs);
   line-height: 1.5;
   color: var(--el-text-color-secondary);
+}
+.field-hint {
+  margin-top: 4px;
+  font-size: var(--kb-font-xs);
+  line-height: 1.5;
+  color: var(--el-text-color-secondary);
+}
+/* 让红色校验文案占位显示在输入框与灰色规则说明之间，不与说明重叠。 */
+.credential-form :deep(.el-form-item__error) {
+  position: static;
+  padding-top: 2px;
 }
 .token-alert {
   margin-bottom: 12px;

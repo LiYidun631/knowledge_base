@@ -6,6 +6,7 @@ import PageHeader from '../components/ui/PageHeader.vue'
 import DataPanel from '../components/ui/DataPanel.vue'
 import StatusPill from '../components/ui/StatusPill.vue'
 import EmptyState from '../components/ui/EmptyState.vue'
+import { formatBeijingDateTime } from '../utils/datetime'
 
 interface AdminPrompt {
   name: string
@@ -207,7 +208,7 @@ onMounted(load)
             <span class="foot-note">
               来源：{{ sourceMeta[current.source]?.label ?? current.source }}
               <template v-if="current.updated_at">
-                · 更新于 {{ current.updated_at.slice(0, 19).replace('T', ' ') }}
+                · 更新于 {{ formatBeijingDateTime(current.updated_at) }}
               </template>
             </span>
             <div class="foot-actions">

@@ -7,6 +7,7 @@ import PageHeader from '../components/ui/PageHeader.vue'
 import DataPanel from '../components/ui/DataPanel.vue'
 import StatusPill from '../components/ui/StatusPill.vue'
 import EmptyState from '../components/ui/EmptyState.vue'
+import { formatBeijingDateTime } from '../utils/datetime'
 
 interface GlobalSearchHit {
   kind: GroupKind
@@ -140,7 +141,8 @@ function splitByKeyword(text: string | null, needle: string): Part[] {
 }
 
 function formatTime(value: string | null): string {
-  return value ? value.slice(0, 16).replace('T', ' ') : ''
+  // 库存 UTC，界面按北京时间展示到分钟。
+  return value ? formatBeijingDateTime(value, false) : ''
 }
 
 function renderGroups(groupsData: GlobalSearchGroup[]): RenderGroup[] {
