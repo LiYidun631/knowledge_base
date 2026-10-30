@@ -3,6 +3,10 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { Search } from '@element-plus/icons-vue'
 import { client, errorText } from '../api/client'
+import PageHeader from '../components/ui/PageHeader.vue'
+import DataPanel from '../components/ui/DataPanel.vue'
+import StatusPill from '../components/ui/StatusPill.vue'
+import EmptyState from '../components/ui/EmptyState.vue'
 
 interface GlobalSearchHit {
   kind: GroupKind
@@ -38,6 +42,7 @@ interface RenderHit extends GlobalSearchHit {
   titleParts: Part[]
   snippetParts: Part[]
   statusLabel: string
+  statusTone: PillTone | null
 }
 
 interface RenderGroup {
@@ -80,9 +85,34 @@ const STATUS_LABELS: Record<GroupKind, Record<string, string>> = {
   product: {},
 }
 
+type PillTone = 'success' | 'warning' | 'danger' | 'info' | 'primary'
+
+// 状态码按语义着色，和列表页的状态胶囊保持同一套语气。
+const STATUS_TONES: Record<GroupKind, Record<string, PillTone>> = {
+  knowledge_base: { active: 'success', archived: 'info' },
+  document: {
+    queued: 'info',
+    processing: 'warning',
+    completed: 'success',
+    failed: 'danger',
+    deleting: 'info',
+  },
+  faq: { auto: 'info', manual: 'primary' },
+  qa_record: { success: 'success', no_results: 'warning', failed: 'danger', running: 'primary' },
+  project_trace: {
+    rag: 'primary',
+    direct: 'primary',
+    clarification: 'warning',
+    chat: 'info',
+    health_data: 'info',
+    report: 'info',
+    refusal: 'danger',
+  },
+  product: {},
+}
+
 const route = useRoute()
 const router = useRouter()
-
 const input = ref('')
 const keyword = ref('')
 const loading = ref(false)
@@ -125,6 +155,7 @@ function renderGroups(groupsData: GlobalSearchGroup[]): RenderGroup[] {
         titleParts: splitByKeyword(hit.title, keyword.value),
         snippetParts: splitByKeyword(hit.snippet, keyword.value),
         statusLabel: hit.status ? STATUS_LABELS[hit.kind][hit.status] ?? hit.status : '',
+        statusTone: hit.status ? STATUS_TONES[hit.kind][hit.status] ?? 'info' : null,
       })),
     }))
 }
@@ -228,6 +259,18 @@ function goSeeAll(group: RenderGroup) {
 
 <template>
   <section class="search-page">
+    <PageHeader
+      title="全局搜索"
+      eyebrow="一键六类"
+      subtitle="知识库、文档、FAQ、问答记录、项目轨迹、产品目录 · 结果按类型分组，命中词高亮"
+    >
+      <template #meta>
+        <span v-if="keyword && !error" class="header-count">
+          「{{ keyword }}」命中 {{ totalHits }} 条 · {{ tookMs }} ms
+        </span>
+      </template>
+    </PageHeader>
+
     <form class="search-bar" @submit.prevent="submit">
       <el-icon class="search-bar-icon"><Search /></el-icon>
       <input
@@ -241,15 +284,6 @@ function goSeeAll(group: RenderGroup) {
       <button class="search-submit" type="submit" :disabled="!input.trim()">搜索</button>
     </form>
 
-    <div class="meta-row">
-      <span v-if="keyword && !error" class="meta-text">
-        「{{ keyword }}」命中 {{ totalHits }} 条
-        <i class="meta-dot" />
-        {{ tookMs }} ms
-      </span>
-      <span v-else class="meta-hint">输入关键词后回车：六类资源一次搜完，点结果直达对应页面</span>
-    </div>
-
     <el-alert
       v-if="error"
       type="error"
@@ -259,15 +293,12 @@ function goSeeAll(group: RenderGroup) {
       class="error-alert"
     />
 
-    <div v-if="!keyword" class="state-panel">
-      <div class="state-glyph" aria-hidden="true">
-        <span /><span /><span />
-      </div>
-      <p class="state-title">从一个关键词开始</p>
-      <p class="state-text">
-        例如产品名、文档文件名、FAQ 问题、用户提问或项目标识；结果按资源类型分组，命中词会高亮。
-      </p>
-    </div>
+    <DataPanel v-if="!keyword">
+      <EmptyState
+        title="从一个关键词开始"
+        text="例如产品名、文档文件名、FAQ 问题、用户提问或项目标识；只搜索字面文本，不做同义词扩展。"
+      />
+    </DataPanel>
 
     <div v-else-if="loading" class="result-grid" aria-busy="true">
       <div v-for="index in 3" :key="index" class="result-card is-skeleton">
@@ -277,15 +308,13 @@ function goSeeAll(group: RenderGroup) {
       </div>
     </div>
 
-    <div v-else-if="groups.length === 0 && !error" class="state-panel">
-      <div class="state-glyph is-miss" aria-hidden="true">
-        <span /><span /><span />
-      </div>
-      <p class="state-title">没有匹配「{{ keyword }}」的内容</p>
-      <p class="state-text">
-        试试更短的关键词，或去掉型号、编号等限定词；只搜索字面文本，不做同义词扩展。
-      </p>
-    </div>
+    <DataPanel v-else-if="groups.length === 0 && !error">
+      <EmptyState
+        :title="`没有匹配「${keyword}」的内容`"
+        text="试试更短的关键词，或去掉型号、编号等限定词。"
+        muted
+      />
+    </DataPanel>
 
     <div v-else class="result-grid">
       <article
@@ -323,7 +352,12 @@ function goSeeAll(group: RenderGroup) {
             </p>
             <div class="hit-meta">
               <span v-if="hit.subtitle" class="hit-owner">{{ hit.subtitle }}</span>
-              <span v-if="hit.statusLabel" class="hit-status">{{ hit.statusLabel }}</span>
+              <StatusPill
+                v-if="hit.statusLabel"
+                :label="hit.statusLabel"
+                :tone="hit.statusTone ?? 'info'"
+                :dot="false"
+              />
               <span v-if="hit.created_at" class="hit-time">{{ formatTime(hit.created_at) }}</span>
             </div>
           </li>
@@ -339,6 +373,15 @@ function goSeeAll(group: RenderGroup) {
   flex-direction: column;
   gap: 14px;
 }
+/* 间距统一由 flex gap 控制，页头自带的 margin 会变成双倍。 */
+.search-page > .page-header {
+  margin-bottom: 0;
+}
+.header-count {
+  font-size: var(--kb-font-xs);
+  color: var(--el-text-color-secondary);
+  font-variant-numeric: tabular-nums;
+}
 
 /* 检索框：单行、等宽留白，聚焦时只用描边和阴影表态，不做弹跳。 */
 .search-bar {
@@ -346,12 +389,12 @@ function goSeeAll(group: RenderGroup) {
   align-items: center;
   gap: 10px;
   background: #fff;
-  border: 1px solid #e2e4ea;
-  border-radius: 12px;
+  border: 1px solid var(--el-border-color);
+  border-radius: var(--kb-panel-radius);
   padding: 6px 6px 6px 14px;
   transition:
-    border-color 0.18s cubic-bezier(0.4, 0, 0.2, 1),
-    box-shadow 0.18s cubic-bezier(0.4, 0, 0.2, 1);
+    border-color 0.18s var(--kb-ease),
+    box-shadow 0.18s var(--kb-ease);
 }
 
 .search-bar:focus-within {
@@ -360,7 +403,7 @@ function goSeeAll(group: RenderGroup) {
 }
 
 .search-bar-icon {
-  color: #9aa0ad;
+  color: var(--el-text-color-placeholder);
   font-size: 16px;
 }
 
@@ -370,21 +413,21 @@ function goSeeAll(group: RenderGroup) {
   border: none;
   outline: none;
   background: transparent;
-  font-size: 14px;
-  color: #1f2937;
+  font-size: var(--kb-font-md);
+  color: var(--el-text-color-primary);
   padding: 6px 0;
 }
 
 .search-input::placeholder {
-  color: #a8adb8;
+  color: var(--el-text-color-placeholder);
 }
 
 .search-submit {
   border: none;
-  border-radius: 8px;
+  border-radius: 6px;
   background: var(--el-color-primary);
   color: #fff;
-  font-size: 13px;
+  font-size: var(--kb-font-sm);
   padding: 7px 16px;
   cursor: pointer;
   transition:
@@ -405,30 +448,8 @@ function goSeeAll(group: RenderGroup) {
   cursor: not-allowed;
 }
 
-.meta-row {
-  display: flex;
-  align-items: center;
-  min-height: 18px;
-}
-
-.meta-text,
-.meta-hint {
-  font-size: 12px;
-  color: #6b7280;
-}
-
-.meta-dot {
-  display: inline-block;
-  width: 3px;
-  height: 3px;
-  margin: 0 6px;
-  border-radius: 50%;
-  background: #c4c8d0;
-  vertical-align: middle;
-}
-
 .error-alert {
-  border-radius: 10px;
+  border-radius: var(--kb-panel-radius);
 }
 
 /* 结果：宽屏两列，卡片等高线对齐顶部；窄屏自然堆叠。 */
@@ -440,11 +461,12 @@ function goSeeAll(group: RenderGroup) {
 }
 
 .result-card {
-  background: #fff;
-  border: 1px solid #e6e8ee;
-  border-radius: 12px;
+  background: var(--kb-panel-bg);
+  border: 1px solid var(--kb-panel-border);
+  border-radius: var(--kb-panel-radius);
+  box-shadow: var(--kb-panel-shadow);
   padding: 12px 14px 8px;
-  animation: card-rise 0.28s cubic-bezier(0.4, 0, 0.2, 1) both;
+  animation: card-rise 0.28s var(--kb-ease) both;
 }
 
 @keyframes card-rise {
@@ -463,11 +485,11 @@ function goSeeAll(group: RenderGroup) {
   align-items: center;
   gap: 8px;
   padding-bottom: 8px;
-  border-bottom: 1px dashed #eceef3;
+  border-bottom: 1px solid var(--el-border-color-lighter);
 }
 
 .kind-chip {
-  font-size: 11px;
+  font-size: var(--kb-font-2xs);
   line-height: 1;
   padding: 4px 8px;
   border-radius: 999px;
@@ -505,8 +527,8 @@ function goSeeAll(group: RenderGroup) {
 }
 
 .card-count {
-  font-size: 12px;
-  color: #8a8f9a;
+  font-size: var(--kb-font-xs);
+  color: var(--el-text-color-secondary);
 }
 
 .card-more {
@@ -514,7 +536,7 @@ function goSeeAll(group: RenderGroup) {
   border: none;
   background: transparent;
   color: var(--el-color-primary);
-  font-size: 12px;
+  font-size: var(--kb-font-xs);
   cursor: pointer;
   padding: 2px 4px;
   border-radius: 6px;
@@ -553,7 +575,7 @@ function goSeeAll(group: RenderGroup) {
 }
 
 .hit:hover {
-  background: #f7f8fc;
+  background: var(--el-fill-color-light);
 }
 
 .hit:hover::before {
@@ -561,14 +583,14 @@ function goSeeAll(group: RenderGroup) {
 }
 
 .hit + .hit {
-  border-top: 1px solid #f3f4f8;
+  border-top: 1px solid var(--el-border-color-lighter);
 }
 
 .hit-title {
   margin: 0;
-  font-size: 13px;
+  font-size: var(--kb-font-sm);
   line-height: 1.5;
-  color: #1f2937;
+  color: var(--el-text-color-primary);
   overflow: hidden;
   display: -webkit-box;
   -webkit-line-clamp: 2;
@@ -577,9 +599,9 @@ function goSeeAll(group: RenderGroup) {
 
 .hit-snippet {
   margin: 3px 0 0;
-  font-size: 12px;
+  font-size: var(--kb-font-xs);
   line-height: 1.55;
-  color: #6b7280;
+  color: var(--el-text-color-secondary);
   overflow: hidden;
   display: -webkit-box;
   -webkit-line-clamp: 2;
@@ -599,73 +621,12 @@ mark {
   flex-wrap: wrap;
   gap: 8px;
   margin-top: 5px;
-  font-size: 11px;
-  color: #9aa0ad;
-}
-
-.hit-status {
-  padding: 0 6px;
-  border-radius: 999px;
-  background: #f2f3f7;
-  color: #6b7280;
+  font-size: var(--kb-font-2xs);
+  color: var(--el-text-color-placeholder);
 }
 
 .hit-time {
   font-variant-numeric: tabular-nums;
-}
-
-/* 空态与骨架：几何小图形，不用插画。 */
-.state-panel {
-  background: #fff;
-  border: 1px dashed #dfe2ea;
-  border-radius: 12px;
-  padding: 44px 24px;
-  text-align: center;
-}
-
-.state-glyph {
-  display: inline-flex;
-  align-items: flex-end;
-  gap: 5px;
-  margin-bottom: 14px;
-}
-
-.state-glyph span {
-  display: block;
-  width: 6px;
-  border-radius: 2px;
-  background: var(--el-color-primary-light-7);
-}
-
-.state-glyph span:nth-child(1) {
-  height: 12px;
-}
-
-.state-glyph span:nth-child(2) {
-  height: 22px;
-  background: var(--el-color-primary-light-5);
-}
-
-.state-glyph span:nth-child(3) {
-  height: 17px;
-}
-
-.state-glyph.is-miss span {
-  background: #e3e5eb;
-}
-
-.state-title {
-  margin: 0;
-  font-size: 14px;
-  color: #374151;
-}
-
-.state-text {
-  margin: 6px auto 0;
-  max-width: 460px;
-  font-size: 12px;
-  line-height: 1.6;
-  color: #8a8f9a;
 }
 
 .is-skeleton {
@@ -678,7 +639,12 @@ mark {
 .skeleton-line {
   height: 10px;
   border-radius: 4px;
-  background: linear-gradient(90deg, #f1f2f6 25%, #e8eaf0 37%, #f1f2f6 63%);
+  background: linear-gradient(
+    90deg,
+    var(--el-fill-color-light) 25%,
+    var(--el-fill-color) 37%,
+    var(--el-fill-color-light) 63%
+  );
   background-size: 400% 100%;
   animation: shimmer 1.2s ease-in-out infinite;
 }

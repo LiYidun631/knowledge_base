@@ -8,6 +8,7 @@ from fastapi import Depends, FastAPI
 
 from knowledge_service.api.audit import audit_write_requests
 from knowledge_service.api.v1.admin import router as admin_router
+from knowledge_service.api.v1.admin_login import router as admin_login_router
 from knowledge_service.api.v1.answer import router as answer_router
 from knowledge_service.api.v1.companies import router as companies_router
 from knowledge_service.api.v1.documents import router as documents_router
@@ -46,6 +47,8 @@ def include_knowledge_module(
     app.include_router(search_router, prefix=api_prefix, dependencies=dependencies)
     app.include_router(answer_router, prefix=api_prefix, dependencies=dependencies)
     app.include_router(product_catalog_router, prefix=api_prefix, dependencies=dependencies)
+    # 登录入口必须匿名可访问，因此不挂宿主鉴权依赖；其余管理端接口仍按管理员凭据校验。
+    app.include_router(admin_login_router, prefix=api_prefix)
     # 管理端接口内部再校验管理员凭据，公司 Token 即使通过宿主鉴权也会被拒绝。
     app.include_router(admin_router, prefix=api_prefix, dependencies=dependencies)
     app.include_router(evaluation_router, prefix=api_prefix, dependencies=dependencies)

@@ -5,6 +5,11 @@ import axios from 'axios'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { client, errorMessage } from '../api/client'
 import { canWrite, isFullAdmin } from '../api/session'
+import PageHeader from '../components/ui/PageHeader.vue'
+import DataPanel from '../components/ui/DataPanel.vue'
+import FilterBar from '../components/ui/FilterBar.vue'
+import StatusPill from '../components/ui/StatusPill.vue'
+import EmptyState from '../components/ui/EmptyState.vue'
 
 interface Company {
   id: string
@@ -71,6 +76,10 @@ const searchKeyword = computed(() =>
 )
 const filteredActiveKbs = computed(() => filterKbs(activeKbs.value))
 const filteredArchivedKbs = computed(() => filterKbs(archivedKbs.value))
+// 页头 meta 用：搜索时显示命中数，否则显示启用中数量。
+const resultCount = computed(
+  () => filteredActiveKbs.value.length + (showArchived.value ? filteredArchivedKbs.value.length : 0),
+)
 
 function filterKbs(list: KnowledgeBase[]): KnowledgeBase[] {
   const keyword = searchKeyword.value.toLowerCase()
@@ -346,63 +355,73 @@ onMounted(async () => {
 
 <template>
   <div class="kb-page">
-    <div class="page-head">
-      <span class="page-head-icon"><el-icon><Collection /></el-icon></span>
-      <div>
-        <div class="page-head-title">知识库管理</div>
-        <div class="page-head-desc">按公司查看知识库，新建子库并管理其入库模型</div>
-      </div>
-    </div>
-    <div class="toolbar">
-      <div class="toolbar-left">
-        <el-select
-          v-model="selectedCompanyId"
-          placeholder="选择公司"
-          style="width: 240px"
-          @change="loadKbs"
-        >
-          <el-option
-            v-for="company in activeCompanies"
-            :key="company.id"
-            :label="company.name"
-            :value="company.id"
-          />
-        </el-select>
-        <el-switch
-          v-model="showArchived"
-          active-text="显示已归档"
-          @change="loadKbs"
+    <PageHeader
+      title="知识库管理"
+      eyebrow="公司子库"
+      subtitle="按公司查看知识库 · 新建子库并管理其入库模型"
+    >
+      <template #meta>
+        <span class="header-count">
+          <template v-if="searchKeyword">「{{ searchKeyword }}」命中 {{ resultCount }} 个</template>
+          <template v-else>共 {{ activeKbs.length }} 个</template>
+        </span>
+        <button v-if="searchKeyword" class="meta-clear" type="button" @click="clearKeyword">
+          清除搜索
+        </button>
+      </template>
+      <template #actions>
+        <el-button v-if="canWrite" type="primary" size="small" @click="openWizard">
+          <el-icon><Plus /></el-icon>新建知识库
+        </el-button>
+      </template>
+    </PageHeader>
+
+    <FilterBar>
+      <el-select
+        v-model="selectedCompanyId"
+        placeholder="选择公司"
+        class="company-select"
+        @change="loadKbs"
+      >
+        <el-option
+          v-for="company in activeCompanies"
+          :key="company.id"
+          :label="company.name"
+          :value="company.id"
         />
-      </div>
-      <el-button v-if="canWrite" type="primary" :icon="'Plus'" @click="openWizard">新建知识库</el-button>
-    </div>
+      </el-select>
+      <el-switch v-model="showArchived" active-text="显示已归档" @change="loadKbs" />
+    </FilterBar>
 
-    <div v-if="searchKeyword" class="search-hint">
-      <span>
-        “{{ searchKeyword }}” 的搜索结果：
-        {{ filteredActiveKbs.length + (showArchived ? filteredArchivedKbs.length : 0) }} 个
-      </span>
-      <el-button link type="primary" @click="clearKeyword">清除搜索</el-button>
-    </div>
-
-    <el-empty
-      v-if="activeCompanies.length === 0"
-      description="暂无可用公司，请先到「公司管理」创建公司"
-    />
-    <el-empty
+    <DataPanel v-if="activeCompanies.length === 0">
+      <EmptyState title="还没有可用公司" text="请先到「公司管理」创建公司。" />
+    </DataPanel>
+    <DataPanel
       v-else-if="!loading && !searchKeyword && activeKbs.length === 0 && archivedKbs.length === 0"
-      description="该公司还没有知识库，点击右上角「新建知识库」"
-    />
+    >
+      <EmptyState
+        title="该公司还没有知识库"
+        :text="canWrite ? '点击右上「新建知识库」创建第一个子库。' : '等待管理员创建子库。'"
+      />
+    </DataPanel>
     <template v-else>
-      <el-empty
+      <DataPanel
         v-if="
           !loading &&
           filteredActiveKbs.length === 0 &&
           !(showArchived && filteredArchivedKbs.length > 0)
         "
-        :description="searchKeyword ? '没有匹配的知识库' : '暂无启用中的知识库'"
-        :image-size="searchKeyword ? 110 : 80"
-      />
+      >
+        <EmptyState
+          :title="searchKeyword ? '没有匹配的知识库' : '暂无启用中的知识库'"
+          :text="
+            searchKeyword
+              ? '换个关键词，或清除搜索查看全部。'
+              : '打开上方「显示已归档」可查看归档库。'
+          "
+          :muted="Boolean(searchKeyword)"
+        />
+      </DataPanel>
       <el-row v-else :gutter="16" v-loading="loading">
         <el-col
           v-for="(kb, index) in filteredActiveKbs"
@@ -420,8 +439,10 @@ onMounted(async () => {
             <div class="kb-card-head">
               <span class="kb-icon"><el-icon><Collection /></el-icon></span>
               <span class="kb-name" :title="kb.name">{{ kb.name }}</span>
-              <el-tag v-if="kb.status === 'active'" type="success" size="small" effect="light">启用</el-tag>
-              <el-tag v-else type="info" size="small" effect="light">{{ kb.status }}</el-tag>
+              <StatusPill
+                :label="kb.status === 'active' ? '启用' : '已归档'"
+                :tone="kb.status === 'active' ? 'success' : 'info'"
+              />
             </div>
             <p class="kb-desc" :title="kb.description ?? ''">
               {{ kb.description || '暂无说明' }}
@@ -481,7 +502,7 @@ onMounted(async () => {
               <div class="kb-card-head">
                 <span class="kb-icon archived-icon"><el-icon><Collection /></el-icon></span>
                 <span class="kb-name" :title="kb.name">{{ kb.name }}</span>
-                <el-tag type="info" size="small" effect="plain">已归档</el-tag>
+                <StatusPill label="已归档" tone="info" />
               </div>
               <p class="kb-desc" :title="kb.description ?? ''">
                 {{ kb.description || '暂无说明' }}
@@ -679,78 +700,31 @@ onMounted(async () => {
 </template>
 
 <style scoped>
-.kb-page {
-  padding: 0;
-}
-.page-head {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  margin-bottom: 20px;
-}
-.page-head-icon {
-  width: 36px;
-  height: 36px;
-  border-radius: 8px;
-  display: grid;
-  place-items: center;
-  color: #4f46e5;
-  font-size: 17px;
-  background: #eef0fd;
-}
-.page-head-title {
-  font-size: 20px;
-  font-weight: 600;
-  letter-spacing: -0.2px;
-  color: var(--el-text-color-primary);
-}
-.page-head-desc {
-  font-size: 13px;
+.header-count {
+  font-size: var(--kb-font-xs);
   color: var(--el-text-color-secondary);
-  margin-top: 4px;
+  font-variant-numeric: tabular-nums;
 }
-.toolbar {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 12px;
-  margin-bottom: 16px;
-  padding: 10px 12px;
-  background: #fff;
-  border: 1px solid var(--el-border-color);
-  border-radius: var(--el-border-radius-base);
+.meta-clear {
+  padding: 0;
+  border: none;
+  background: transparent;
+  font-size: var(--kb-font-2xs);
+  color: var(--el-color-primary);
+  cursor: pointer;
 }
-.toolbar-left {
-  display: flex;
-  align-items: center;
-  gap: 16px;
+.meta-clear:hover {
+  text-decoration: underline;
 }
-.search-hint {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  margin: -4px 0 12px;
-  padding: 8px 12px;
-  font-size: 13px;
-  color: var(--el-text-color-regular);
-  background: var(--el-color-primary-light-9);
-  border: 1px solid var(--el-color-primary-light-8);
-  border-radius: var(--el-border-radius-small);
-  animation: hint-in 0.2s var(--kb-ease);
-}
-@keyframes hint-in {
-  from {
-    opacity: 0;
-    transform: translateY(-2px);
-  }
+.company-select {
+  width: 240px;
 }
 .archived-title {
   display: flex;
   align-items: center;
   gap: 8px;
   margin: 4px 0 14px;
-  font-size: 13px;
+  font-size: var(--kb-font-sm);
   font-weight: 600;
   color: var(--el-text-color-secondary);
 }

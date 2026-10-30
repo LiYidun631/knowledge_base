@@ -10,7 +10,8 @@
 | `model_prices` | `id`、`model_name`、`provider`、`input_price_per_million`、`output_price_per_million` | 生成模型 token 单价（元/百万 tokens），`model_name` 唯一；问答成本按当前单价实时核算，调整后历史金额一起变化 |
 | `companies` | `id`、`code`、`name`、`status` | 公共服务最外层租户，公司级数据隔离边界 |
 | `company_credentials` | `id`、`company_id`、`name`、`token_hash`、`is_enabled`、`created_at`、`updated_at` | 每公司可有多枚按项目命名的凭据，仅存 SHA-256 哈希；每请求查库鉴权 |
-| `admin_credentials` | `id`、`name`、`role`、`token_hash`、`is_enabled` | 库内管理员凭据，角色为 `admin`/`operator`/`viewer`；仅存 SHA-256 哈希 |
+| `admin_credentials` | `id`、`name`、`role`、`token_hash`、`username`、`password_hash`、`is_enabled` | 库内管理员凭据，角色为 `admin`/`operator`/`viewer`；Token 与密码均只存哈希，账号密码可选 |
+| `admin_sessions` | `id`、`credential_id`、`token_hash`、`expires_at`、`client_ip` | 账号密码登录换出的短期会话，7 天有效；改密、停用、重置凭据时级联清除 |
 | `audit_logs` | `id`、`actor_name`、`actor_role`、`credential_id`、`method`、`path`、`status_code`、`duration_ms`、`client_ip`、`created_at` | 管理端写操作审计；操作者信息为写入时快照，不保存请求体，保留 180 天 |
 | `vector_libraries` | `id`、`company_id`、`embedding_model_id`、`rerank_model_id`、`models_locked_at`、`status` | 每家公司唯一的大库，统一锁定向量模型 |
 | `knowledge_bases` | `id`、`company_id`、`vector_library_id`、`name`、`description`、`embedding_model_id`、`rerank_model_id`、`models_locked_at`、`status` | 公司大库下的子库；模型继承大库 |
@@ -38,7 +39,8 @@
 | --- | --- |
 | `model_profiles` | 模型通讯录：记录使用哪家平台、模型名称、向量维度和密钥引用。 |
 | `model_prices` | 价目表：按模型名记录输入/输出 token 单价，仪表盘据此把 token 换算成金额。 |
-| `admin_credentials` | 管理员钥匙串：每把钥匙对应一个人或用途，并标注全权、运营或只读。 |
+| `admin_credentials` | 管理员钥匙串：每把钥匙对应一个人或用途，并标注全权、运营或只读；可以额外配一个短账号和密码，用来代替长 Token 登录。 |
+| `admin_sessions` | 临时门禁卡：账号密码登录后发一张，7 天后自动作废，改密码或停用账号即刻全部收回。 |
 | `audit_logs` | 操作留痕：记录谁在什么时候做了什么写操作、结果如何，不记内容本身。 |
 | `knowledge_bases` | 知识库目录：记录知识库名称，以及创建时绑定的 Embedding/Rerank 模型。 |
 | `documents` | 文件目录：同一个业务文件的逻辑记录，重复上传会增加版本。 |
@@ -89,9 +91,9 @@
 
 真实数据库迁移及实际 `.env` 更新仍待核对目标与备份，不能将迁移文件已实现视为已在目标库执行。确认连接和备份后再按部署流程执行迁移、由管理员签发，并安全交付给调用方。
 
-## 管理员角色与审计（`admin_credentials` / `audit_logs`）
+## 管理员角色、登录会话与审计（`admin_credentials` / `admin_sessions` / `audit_logs`）
 
-`admin_credentials` 保存库内管理员凭据：`id`、`name`、`role`、`token_hash`（SHA-256 十六进制，全局唯一）、`is_enabled` 与时间戳。`.env` 的 `KNOWLEDGE_SERVICE_AUTH_ADMIN_TOKEN` 引导 Token 不在此表且始终按 `admin` 生效。
+`admin_credentials` 保存库内管理员凭据：`id`、`name`、`role`、`token_hash`（SHA-256 十六进制，全局唯一）、`username`、`password_hash`、`is_enabled` 与时间戳。`.env` 的 `KNOWLEDGE_SERVICE_AUTH_ADMIN_TOKEN` 引导 Token 不在此表且始终按 `admin` 生效。
 
 | `role` | 能力 |
 | --- | --- |
@@ -100,6 +102,30 @@
 | `viewer` | 业务数据只读；允许问答与检索 POST |
 
 `role` 为新增列，迁移 `0033_admin_roles_audit` 对存量行回填 `admin`，原权限不变。鉴权每请求查库，角色改动立即生效。`.env` 引导 Token 为空时（服务本身返回 `503`），服务端拒绝停用、删除或降级最后一名启用中的 `admin` 凭据（`409`），避免无人可管理。
+
+### 账号密码登录（迁移 `0034_admin_login_accounts`）
+
+`admin_credentials` 新增两列，存量行均为 `NULL`，即「只能用长期 Token 登录」，原有凭据行为不变：
+
+| 字段 | 类型与约束 | 含义 |
+| --- | --- | --- |
+| `username` | `String(60)`，可空、全局唯一索引 `ix_admin_credentials_username` | 登录账号，去空格、统一按小写保存与比对，至少 3 个字符且不含空白；唯一索引让并发重名以 `IntegrityError` 收口为 `409` |
+| `password_hash` | `String(255)`，可空 | PBKDF2-SHA256 摘要，格式 `pbkdf2_sha256$迭代次数$盐hex$摘要hex`，迭代 200,000 次，盐随机；不保存也不回读明文密码 |
+
+`username` 与 `password_hash` 必须同时有值，或同时为空：只给账号不给密码返回 `400`，PATCH 传 `username: ""` 表示收回账号密码登录（连同密码一起清空）。
+
+`admin_sessions` 保存登录会话，让「改密码/停用即踢人」可做到即时且可撤销（长期 Token 是不可逆哈希，无法撤销）：
+
+| 字段 | 类型与约束 | 含义 |
+| --- | --- | --- |
+| `id` | `Uuid`，主键 | 会话 ID |
+| `credential_id` | `Uuid`，非空、外键 → `admin_credentials.id`，`ON DELETE CASCADE`，普通索引 | 会话所属管理员凭据；角色与名称按此实时读取，不在会话里快照 |
+| `token_hash` | `String(64)`，非空、唯一 `uq_admin_sessions_token_hash` | 会话 Token（`kas_` + `secrets.token_urlsafe(32)`）的 SHA-256 十六进制哈希，数据库不保存明文 |
+| `expires_at` | UTC 时间戳，非空、普通索引 | 过期时间，签发时取当前时间 + 7 天（`ADMIN_SESSION_TTL`）；到期后请求返回 `401`，下一次成功登录顺带清理过期行 |
+| `client_ip` | `String(64)`，可空 | 登录时的客户端 IP，仅用于排查 |
+| `created_at` / `updated_at` | UTC 时间戳 | 签发时间与记录更新时间 |
+
+会话鉴权与管理员 Token 走同一条 Bearer 路径：先匹配 `admin_credentials.token_hash`，未命中再查 `admin_sessions.token_hash`，每请求查库、无缓存。改密、收回账号、停用凭据、删除凭据（外键级联）和重置 Token 都会删除该凭据的全部会话行，对后续新请求立即生效；改角色不会踢人，下一个请求即按新角色生效。长期 Token 不受影响。登录失败按来源 IP 在进程内存计数（5 次 / 300 秒），不写数据库，因此登录本身不进 `audit_logs`，服务重启即清零。
 
 `audit_logs` 只记录管理端（管理员侧凭据）的 POST/PUT/PATCH/DELETE：
 

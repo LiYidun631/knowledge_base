@@ -4,6 +4,10 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { client, errorMessage } from '../api/client'
 import { canWrite } from '../api/session'
 import { renderMarkdown } from '../utils/markdown'
+import DataPanel from './ui/DataPanel.vue'
+import FilterBar from './ui/FilterBar.vue'
+import StatusPill from './ui/StatusPill.vue'
+import EmptyState from './ui/EmptyState.vue'
 
 interface FaqEntry {
   id: string
@@ -51,11 +55,20 @@ const sourceMeta: Record<string, { label: string; type: 'success' | 'warning' }>
   manual: { label: '手动添加', type: 'warning' },
 }
 
-const emptyText = computed(() => {
-  if (q.value.trim() || sourceFilter.value) return '没有符合条件的 FAQ'
-  if (scope.value === 'kb') return '暂无库级 FAQ，点击「添加」创建'
+// 列表空态区分「筛不到」与「本来就没有」，文案和图形灰度都不同。
+const isFiltered = computed(() => Boolean(q.value.trim() || sourceFilter.value))
+
+const emptyTitle = computed(() => {
+  if (isFiltered.value) return '没有符合条件的 FAQ'
   if (scope.value === 'document' && !documentId.value) return '该知识库还没有文档'
   return '暂无 FAQ'
+})
+
+const emptyHint = computed(() => {
+  if (isFiltered.value) return '换个关键词，或清空来源筛选。'
+  if (scope.value === 'kb') return '点击工具栏「添加」创建库级 FAQ。'
+  if (scope.value === 'document' && !documentId.value) return '先上传文档，再按文档生成 FAQ。'
+  return '上传文档后会自动生成，也可手动添加。'
 })
 
 function docName(id: string | null): string {
@@ -310,87 +323,95 @@ onMounted(async () => {
 <template>
   <div class="faq-panel">
     <div class="panel-bar">
-      <slot name="toolbar" />
-      <template v-if="kbId">
-        <el-input
-          v-model="q"
-          clearable
-          size="small"
-          placeholder="搜索问题或答案"
-          class="search-input"
-          @keyup.enter="applyFilters"
-          @clear="applyFilters"
-        >
-          <template #prefix><el-icon><Search /></el-icon></template>
-        </el-input>
-        <el-select v-model="scope" size="small" class="scope-select" @change="onScopeChange">
-          <el-option label="全部范围" value="all" />
-          <el-option label="仅库级 FAQ" value="kb" />
-          <el-option label="指定文档" value="document" />
-        </el-select>
-        <el-select
-          v-if="scope === 'document'"
-          v-model="documentId"
-          size="small"
-          class="doc-select"
-          placeholder="选择文档"
-          @change="onDocumentChange"
-        >
-          <el-option
-            v-for="doc in documents"
-            :key="doc.id"
-            :label="doc.filename"
-            :value="doc.id"
-          />
-        </el-select>
-        <el-select
-          v-model="sourceFilter"
-          clearable
-          size="small"
-          class="source-select"
-          placeholder="全部来源"
-          @change="applyFilters"
-        >
-          <el-option label="自动生成" value="auto" />
-          <el-option label="手动添加" value="manual" />
-        </el-select>
-        <span class="bar-spacer" />
-        <el-button size="small" circle :icon="'Refresh'" title="刷新" @click="load" />
-        <el-button v-if="canWrite" size="small" type="primary" plain :icon="'Plus'" @click="openAdd">
-          添加
-        </el-button>
-        <el-button
-          v-if="canWrite && generateDoc"
-          size="small"
-          type="success"
-          plain
-          :icon="'MagicStick'"
-          :loading="generating"
-          @click="generate"
-        >
-          本文档生成
-        </el-button>
-        <el-button
-          v-if="canWrite"
-          size="small"
-          type="warning"
-          plain
-          :icon="'MagicStick'"
-          :loading="batchGenerating"
-          @click="generateBatch"
-        >
-          批量补齐
-        </el-button>
-      </template>
+      <FilterBar>
+        <slot name="toolbar" />
+        <template v-if="kbId">
+          <el-input
+            v-model="q"
+            clearable
+            size="small"
+            placeholder="搜索问题或答案"
+            class="search-input"
+            @keyup.enter="applyFilters"
+            @clear="applyFilters"
+          >
+            <template #prefix><el-icon><Search /></el-icon></template>
+          </el-input>
+          <el-select v-model="scope" size="small" class="scope-select" @change="onScopeChange">
+            <el-option label="全部范围" value="all" />
+            <el-option label="仅库级 FAQ" value="kb" />
+            <el-option label="指定文档" value="document" />
+          </el-select>
+          <el-select
+            v-if="scope === 'document'"
+            v-model="documentId"
+            size="small"
+            class="doc-select"
+            placeholder="选择文档"
+            @change="onDocumentChange"
+          >
+            <el-option
+              v-for="doc in documents"
+              :key="doc.id"
+              :label="doc.filename"
+              :value="doc.id"
+            />
+          </el-select>
+          <el-select
+            v-model="sourceFilter"
+            clearable
+            size="small"
+            class="source-select"
+            placeholder="全部来源"
+            @change="applyFilters"
+          >
+            <el-option label="自动生成" value="auto" />
+            <el-option label="手动添加" value="manual" />
+          </el-select>
+        </template>
+        <template #actions v-if="kbId">
+          <button class="refresh-btn" type="button" title="刷新" @click="load">
+            <el-icon :class="{ spinning: loading }"><Refresh /></el-icon>
+          </button>
+          <el-button
+            v-if="canWrite && generateDoc"
+            size="small"
+            plain
+            :icon="'MagicStick'"
+            :loading="generating"
+            @click="generate"
+          >
+            本文档生成
+          </el-button>
+          <el-button
+            v-if="canWrite"
+            size="small"
+            type="warning"
+            plain
+            :icon="'MagicStick'"
+            :loading="batchGenerating"
+            @click="generateBatch"
+          >
+            批量补齐
+          </el-button>
+          <el-button v-if="canWrite" size="small" type="primary" :icon="'Plus'" @click="openAdd">
+            添加
+          </el-button>
+        </template>
+      </FilterBar>
     </div>
 
-    <el-empty
-      v-if="!kbId"
-      class="faq-empty"
-      description="先选择公司与知识库"
-    />
+    <div v-if="!kbId" class="faq-empty">
+      <EmptyState title="先选择公司与知识库" text="选定知识库后，这里会列出库级与文档级 FAQ。" />
+    </div>
 
-    <div v-if="kbId" class="faq-list" v-loading="loading">
+    <DataPanel
+      v-if="kbId"
+      class="list-panel"
+      title="FAQ 列表"
+      :count="total > 0 ? `${total} 条` : null"
+      v-loading="loading"
+    >
       <div class="faq-items">
         <div
           v-for="entry in faqs"
@@ -401,20 +422,19 @@ onMounted(async () => {
         >
           <div class="faq-question">{{ entry.question }}</div>
           <div class="faq-meta">
-            <el-tag
-              :type="sourceMeta[entry.source]?.type ?? 'info'"
-              size="small"
-              effect="plain"
-            >
-              {{ sourceMeta[entry.source]?.label ?? entry.source }}
-            </el-tag>
+            <StatusPill
+              :label="sourceMeta[entry.source]?.label ?? entry.source"
+              :tone="sourceMeta[entry.source]?.type ?? 'info'"
+              :dot="false"
+            />
             <span class="faq-doc">{{ docName(entry.document_id) }}</span>
           </div>
         </div>
-        <el-empty
+        <EmptyState
           v-if="!loading && faqs.length === 0"
-          :description="emptyText"
-          :image-size="72"
+          :title="emptyTitle"
+          :text="emptyHint"
+          :muted="isFiltered"
         />
       </div>
       <div v-if="total > 0" class="list-pager">
@@ -428,9 +448,9 @@ onMounted(async () => {
           @current-change="load"
         />
       </div>
-    </div>
+    </DataPanel>
 
-    <div v-if="kbId" class="faq-editor" v-loading="loading">
+    <DataPanel v-if="kbId" class="editor-panel" v-loading="loading">
       <template v-if="selected">
         <div class="editor-head">
           <div class="editor-question">
@@ -438,13 +458,11 @@ onMounted(async () => {
             <span>{{ selected.question }}</span>
           </div>
           <div class="editor-tags">
-            <el-tag
-              :type="sourceMeta[selected.source]?.type ?? 'info'"
-              size="small"
-              effect="plain"
-            >
-              {{ sourceMeta[selected.source]?.label ?? selected.source }}
-            </el-tag>
+            <StatusPill
+              :label="sourceMeta[selected.source]?.label ?? selected.source"
+              :tone="sourceMeta[selected.source]?.type ?? 'info'"
+              :dot="false"
+            />
             <span class="editor-doc">{{ docName(selected.document_id) }}</span>
           </div>
         </div>
@@ -472,8 +490,12 @@ onMounted(async () => {
           </div>
         </div>
       </template>
-      <el-empty v-else description="选择左侧条目查看详情" :image-size="72" />
-    </div>
+      <EmptyState
+        v-else
+        title="选择左侧条目查看详情"
+        text="命中后原样直出的答案，可在此编辑或让 AI 改写。"
+      />
+    </DataPanel>
 
     <el-dialog
       v-model="dialogVisible"
@@ -549,71 +571,105 @@ onMounted(async () => {
 <style scoped>
 .faq-panel {
   display: grid;
-  grid-template-columns: 300px 1fr;
-  grid-template-rows: auto 1fr;
+  grid-template-columns: 310px minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
   gap: 16px;
+  min-width: 0;
   min-height: 420px;
 }
 .panel-bar {
   grid-column: 1 / -1;
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
 }
-.search-input {
-  width: 190px;
-}
-.scope-select {
-  width: 110px;
-}
-.doc-select {
-  width: 160px;
-}
-.source-select {
-  width: 110px;
+/* 间距由网格 gap 控制，FilterBar 自带的 margin 会变成双倍。 */
+.panel-bar :deep(.filter-bar) {
+  margin-bottom: 0;
 }
 .faq-empty {
   grid-column: 1 / -1;
 }
-.bar-spacer {
-  flex: 1;
+.search-input {
+  width: 170px;
 }
-.faq-list {
+.scope-select {
+  width: 100px;
+}
+.doc-select {
+  width: 140px;
+}
+.source-select {
+  width: 96px;
+}
+.refresh-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
   border: 1px solid var(--el-border-color);
-  border-radius: var(--el-border-radius-base);
-  padding: 12px;
-  background: #fff;
+  border-radius: 6px;
+  background: var(--kb-panel-bg);
+  color: var(--el-text-color-regular);
+  cursor: pointer;
+  transition:
+    border-color 0.15s var(--kb-ease),
+    color 0.15s var(--kb-ease);
+}
+.refresh-btn:hover {
+  border-color: var(--el-color-primary-light-5);
+  color: var(--el-color-primary);
+}
+.spinning {
+  animation: spin 0.9s linear infinite;
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.list-panel {
   display: flex;
   flex-direction: column;
-  max-height: 560px;
-  overflow-y: auto;
+  min-width: 0;
+}
+.list-panel :deep(.panel-body) {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
 }
 .faq-items {
   display: flex;
+  flex: 1 1 auto;
   flex-direction: column;
   gap: 8px;
+  min-height: 0;
+  max-height: 640px;
+  overflow-y: auto;
+  padding-right: 2px;
 }
 .faq-item {
   padding: 10px 12px;
-  border: 1px solid var(--el-border-color);
-  border-radius: 6px;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 8px;
   cursor: pointer;
   display: flex;
   flex-direction: column;
   gap: 6px;
-  transition: border-color 0.15s var(--kb-ease), box-shadow 0.15s var(--kb-ease);
+  transition:
+    border-color 0.15s var(--kb-ease),
+    background-color 0.15s var(--kb-ease);
 }
 .faq-item:hover {
   border-color: var(--el-border-color-dark);
-  box-shadow: 0 2px 8px rgba(15, 23, 42, 0.06);
+  background: var(--el-fill-color-lighter);
 }
 .faq-item.active {
-  border-color: var(--el-color-primary);
+  border-color: var(--el-color-primary-light-5);
   background: var(--el-color-primary-light-9);
 }
 .faq-question {
-  font-size: 13px;
+  font-size: var(--kb-font-sm);
   font-weight: 600;
   color: var(--el-text-color-primary);
   line-height: 1.5;
@@ -628,7 +684,7 @@ onMounted(async () => {
   gap: 8px;
 }
 .faq-doc {
-  font-size: 11px;
+  font-size: var(--kb-font-2xs);
   color: var(--el-text-color-secondary);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -636,20 +692,26 @@ onMounted(async () => {
   max-width: 150px;
 }
 .list-pager {
-  margin-top: auto;
-  padding-top: 8px;
   display: flex;
-  justify-content: center;
+  justify-content: flex-end;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--el-border-color-lighter);
 }
 
-.faq-editor {
-  border: 1px solid var(--el-border-color);
-  border-radius: var(--el-border-radius-base);
-  padding: 16px;
-  background: #fff;
+.editor-panel {
   display: flex;
   flex-direction: column;
+  min-width: 0;
+}
+.editor-panel :deep(.panel-body) {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
   gap: 12px;
+}
+.editor-panel :deep(.empty-state) {
+  margin: auto;
 }
 .editor-head {
   display: flex;
@@ -661,7 +723,7 @@ onMounted(async () => {
   display: flex;
   align-items: flex-start;
   gap: 8px;
-  font-size: 15px;
+  font-size: var(--kb-font-md);
   font-weight: 600;
   color: var(--el-text-color-primary);
   line-height: 1.5;
@@ -674,7 +736,7 @@ onMounted(async () => {
   border-radius: 7px;
   display: grid;
   place-items: center;
-  font-size: 12px;
+  font-size: var(--kb-font-xs);
   font-weight: 700;
   color: #fff;
 }
@@ -692,7 +754,7 @@ onMounted(async () => {
   flex: none;
 }
 .editor-doc {
-  font-size: 12px;
+  font-size: var(--kb-font-xs);
   color: var(--el-text-color-secondary);
 }
 .answer-box {
@@ -700,7 +762,7 @@ onMounted(async () => {
   gap: 10px;
   background: var(--el-color-primary-light-9);
   border: 1px solid var(--el-color-primary-light-8);
-  border-radius: var(--el-border-radius-base);
+  border-radius: var(--kb-panel-radius);
   padding: 14px;
 }
 .answer-label {
@@ -708,10 +770,11 @@ onMounted(async () => {
 }
 .answer-content {
   flex: 1;
-  font-size: 14px;
+  font-size: var(--kb-font-md);
   line-height: 1.8;
   color: var(--el-text-color-regular);
   min-width: 0;
+  overflow-x: auto;
 }
 .answer-content :deep(p) {
   margin: 0 0 8px;
@@ -727,7 +790,7 @@ onMounted(async () => {
 .answer-content :deep(td) {
   border: 1px solid var(--el-border-color);
   padding: 6px 10px;
-  font-size: 13px;
+  font-size: var(--kb-font-sm);
 }
 .editor-foot {
   display: flex;
@@ -736,7 +799,7 @@ onMounted(async () => {
   margin-top: auto;
 }
 .foot-note {
-  font-size: 12px;
+  font-size: var(--kb-font-xs);
   color: var(--el-text-color-secondary);
 }
 .foot-actions {
@@ -750,7 +813,10 @@ onMounted(async () => {
 
 @media (max-width: 900px) {
   .faq-panel {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .faq-items {
+    max-height: 360px;
   }
 }
 </style>

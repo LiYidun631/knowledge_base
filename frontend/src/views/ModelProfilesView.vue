@@ -3,6 +3,10 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { client, errorMessage } from '../api/client'
+import PageHeader from '../components/ui/PageHeader.vue'
+import DataPanel from '../components/ui/DataPanel.vue'
+import StatusPill from '../components/ui/StatusPill.vue'
+import EmptyState from '../components/ui/EmptyState.vue'
 
 interface ModelPreset {
   key: string
@@ -392,11 +396,19 @@ function kindUsage(kind: string): string {
   return KIND_USAGE[kind as keyof typeof KIND_USAGE] ?? ''
 }
 
+// 类型标签沿用同一套胶囊，色彩只区分语义，不再用全饱和 el-tag。
+const KIND_META: Record<ProfileKind, { label: string; tone: 'info' | 'warning' | 'success' | 'primary' }> = {
+  embedding: { label: 'Embedding', tone: 'info' },
+  rerank: { label: 'Rerank', tone: 'warning' },
+  chat: { label: 'Chat 生成', tone: 'success' },
+  ocr: { label: 'OCR', tone: 'primary' },
+}
+
 function usageStatus(item: ModelUsageItem) {
-  if (!item.model_name.trim()) return { label: '未配置', type: 'info' as const }
-  if (!item.is_enabled) return { label: '已停用', type: 'info' as const }
-  if (!item.is_active) return { label: '未生效', type: 'info' as const }
-  return { label: '生效中', type: 'success' as const }
+  if (!item.model_name.trim()) return { label: '未配置', tone: 'info' as const }
+  if (!item.is_enabled) return { label: '已停用', tone: 'info' as const }
+  if (!item.is_active) return { label: '未生效', tone: 'info' as const }
+  return { label: '生效中', tone: 'success' as const }
 }
 
 function scopeLabel(item: ModelUsageItem): string {
@@ -737,276 +749,318 @@ onMounted(() => {
 </script>
 
 <template>
-  <el-card>
-    <template #header>
-      <div class="header">
-        <span class="header-title"><el-icon><Cpu /></el-icon>模型管理</span>
-        <el-button :loading="loading || usageLoading" @click="refreshAll()">刷新</el-button>
-      </div>
-    </template>
+  <div class="models-page">
+    <PageHeader
+      title="模型管理"
+      eyebrow="模型与计费"
+      subtitle="汇总服务实际调用的全部模型 · 档案可直接编辑，环境配置可接入管理替换，无需重启"
+    >
+      <template #meta>
+        <span class="header-count">
+          {{ usageSlots.length }} 类调用 · {{ profiles.length }} 个档案
+        </span>
+      </template>
+      <template #actions>
+        <el-button
+          size="small"
+          :loading="loading || usageLoading || priceLoading || presetLoading"
+          @click="refreshAll()"
+        >
+          <el-icon><Refresh /></el-icon>刷新
+        </el-button>
+      </template>
+    </PageHeader>
 
-    <el-tabs v-model="activeTab">
-      <el-tab-pane label="调用位置" name="usage">
-        <p class="usage-head">
-          汇总服务实际调用的全部模型；档案可直接编辑，环境配置项可新建默认档案替换，无需重启。
-        </p>
-        <div v-loading="usageLoading" class="usage-list">
-          <div v-for="slot in usageSlots" :key="slot.key" class="usage-row">
-            <div class="usage-slot">
-              <div class="usage-slot-title">{{ SLOT_META[slot.key].label }}</div>
-              <div class="usage-slot-desc">{{ SLOT_META[slot.key].desc }}</div>
-            </div>
-            <div class="usage-models">
-              <div
-                v-for="item in slot.items"
-                :key="`${slot.key}-${item.profile_id ?? item.source}`"
-                class="usage-model"
-                :class="{ 'is-inactive': usageStatus(item).label !== '生效中' }"
-              >
-                <div class="usage-model-main">
-                  <span class="usage-model-name">{{ item.name }}</span>
-                  <el-tag size="small" effect="plain" :type="SOURCE_META[item.source].type">
-                    {{ SOURCE_META[item.source].label }}
-                  </el-tag>
-                  <el-tag v-if="item.is_default" size="small" type="danger" effect="plain">
-                    默认
-                  </el-tag>
-                  <el-tag size="small" effect="plain" :type="usageStatus(item).type">
-                    {{ usageStatus(item).label }}
-                  </el-tag>
-                  <span class="usage-model-actions">
-                    <el-button
-                      v-if="item.profile_id"
-                      link
-                      type="primary"
-                      size="small"
-                      @click="editUsageModel(item)"
-                    >
-                      编辑
-                    </el-button>
-                    <el-button
-                      v-else
-                      link
-                      type="primary"
-                      size="small"
-                      @click="adoptEnvironmentModel(slot.key, item)"
-                    >
-                      接入管理
-                    </el-button>
-                  </span>
+    <DataPanel flush class="tabs-panel">
+      <el-tabs v-model="activeTab" class="models-tabs">
+        <el-tab-pane label="调用位置" name="usage">
+          <div class="tab-body">
+            <p class="tab-note">
+              汇总服务实际调用的全部模型；档案可直接编辑，环境配置项可新建默认档案替换，无需重启。
+            </p>
+            <div v-loading="usageLoading" class="usage-list">
+              <div v-for="slot in usageSlots" :key="slot.key" class="usage-row">
+                <div class="usage-slot">
+                  <div class="usage-slot-title">{{ SLOT_META[slot.key].label }}</div>
+                  <div class="usage-slot-desc">{{ SLOT_META[slot.key].desc }}</div>
                 </div>
-                <div class="usage-model-meta">
-                  <span>{{ item.provider || '未指定供应商' }}</span>
-                  <span class="meta-dot">·</span>
-                  <span class="usage-model-id">{{ item.model_name || '未配置模型名' }}</span>
-                </div>
-                <div v-if="scopeText(item, slot.key)" class="usage-model-scope">
-                  <span class="scope-label">{{ scopeLabel(item) }}</span>
-                  {{ scopeText(item, slot.key) }}
+                <div class="usage-models">
+                  <div
+                    v-for="item in slot.items"
+                    :key="`${slot.key}-${item.profile_id ?? item.source}`"
+                    class="usage-model"
+                    :class="{ 'is-inactive': usageStatus(item).label !== '生效中' }"
+                  >
+                    <div class="usage-model-main">
+                      <span class="usage-model-name">{{ item.name }}</span>
+                      <StatusPill
+                        :label="SOURCE_META[item.source].label"
+                        :tone="SOURCE_META[item.source].type"
+                        :dot="false"
+                      />
+                      <StatusPill v-if="item.is_default" label="默认" tone="danger" :dot="false" />
+                      <StatusPill :label="usageStatus(item).label" :tone="usageStatus(item).tone" />
+                      <span class="usage-model-actions">
+                        <el-button
+                          v-if="item.profile_id"
+                          link
+                          type="primary"
+                          size="small"
+                          @click="editUsageModel(item)"
+                        >
+                          编辑
+                        </el-button>
+                        <el-button
+                          v-else
+                          link
+                          type="primary"
+                          size="small"
+                          @click="adoptEnvironmentModel(slot.key, item)"
+                        >
+                          接入管理
+                        </el-button>
+                      </span>
+                    </div>
+                    <div class="usage-model-meta">
+                      <span>{{ item.provider || '未指定供应商' }}</span>
+                      <span class="meta-dot">·</span>
+                      <span class="usage-model-id">{{ item.model_name || '未配置模型名' }}</span>
+                    </div>
+                    <div v-if="scopeText(item, slot.key)" class="usage-model-scope">
+                      <span class="scope-label">{{ scopeLabel(item) }}</span>
+                      {{ scopeText(item, slot.key) }}
+                    </div>
+                  </div>
+                  <div v-if="!slot.items.length" class="usage-empty">
+                    {{ SLOT_META[slot.key].empty }}
+                  </div>
                 </div>
               </div>
-              <div v-if="!slot.items.length" class="usage-empty">
-                {{ SLOT_META[slot.key].empty }}
-              </div>
-            </div>
-          </div>
-          <div v-if="!usageSlots.length && !usageLoading" class="usage-empty">
-            暂无模型调用信息。
-          </div>
-        </div>
-      </el-tab-pane>
-
-      <el-tab-pane label="模型档案" name="profiles">
-        <el-alert
-          type="info"
-          :closable="false"
-          show-icon
-          title="模型档案在大库创建时锁定；已被大库/子库绑定的档案不可修改或删除，换模型需新建大库。"
-          class="tip"
-        />
-        <div class="toolbar">
-          <el-button type="primary" @click="openCreate">新建档案</el-button>
-        </div>
-        <el-table v-loading="loading" :data="profiles" border>
-          <el-table-column prop="name" label="名称" min-width="160" />
-          <el-table-column label="类型与用途" width="160">
-            <template #default="{ row }">
-              <div class="kind-cell">
-                <el-tag v-if="row.kind === 'embedding'" type="info">Embedding</el-tag>
-                <el-tag v-else-if="row.kind === 'chat'" type="success">Chat 生成</el-tag>
-                <el-tag v-else-if="row.kind === 'ocr'" type="primary">OCR</el-tag>
-                <el-tag v-else type="warning">Rerank</el-tag>
-                <span class="kind-usage">{{ kindUsage(row.kind) }}</span>
-              </div>
-            </template>
-          </el-table-column>
-          <el-table-column prop="provider" label="服务商" width="130" />
-          <el-table-column prop="model_name" label="模型名" min-width="160" />
-          <el-table-column prop="dimensions" label="维度" width="80" />
-          <el-table-column label="地址与路径" min-width="220">
-            <template #default="{ row }">{{ settingsText(row) }}</template>
-          </el-table-column>
-          <el-table-column label="API Key" width="110">
-            <template #default="{ row }">
-              <el-tag :type="row.has_api_key ? 'success' : 'info'">
-                {{ row.has_api_key ? '已配置' : '未配置' }}
-              </el-tag>
-            </template>
-          </el-table-column>
-          <el-table-column label="启用" width="70">
-            <template #default="{ row }">
-              <el-switch
-                :model-value="row.is_enabled"
-                @change="(v: string | number | boolean) => toggleEnabled(row, v)"
+              <EmptyState
+                v-if="!usageSlots.length && !usageLoading"
+                title="暂无模型调用信息"
+                text="先新建模型档案或补齐环境配置，这里会列出每类调用的实际模型。"
               />
-            </template>
-          </el-table-column>
-          <el-table-column label="默认" width="70">
-            <template #default="{ row }">
-              <el-tag v-if="row.is_default" type="danger">默认</el-tag>
-            </template>
-          </el-table-column>
-          <el-table-column label="操作" width="360" fixed="right">
-            <template #default="{ row }">
-              <el-button
-                link
-                type="success"
-                size="small"
-                :loading="testingId === row.id"
-                @click="testProfile(row)"
-              >
-                测试连通
-              </el-button>
-              <el-button
-                v-if="!row.is_default"
-                link
-                type="primary"
-                size="small"
-                @click="setDefault(row)"
-              >
-                设为默认
-              </el-button>
-              <el-button v-else link type="info" size="small" @click="clearDefault(row)">
-                取消默认
-              </el-button>
-              <el-button link type="primary" size="small" @click="openKeyDialog(row)">
-                配置密钥
-              </el-button>
-              <el-button v-if="row.has_api_key" link type="warning" size="small" @click="clearApiKey(row)">
-                清除密钥
-              </el-button>
-              <el-button link type="primary" size="small" @click="openEdit(row)">编辑</el-button>
-              <el-button link type="danger" size="small" @click="removeProfile(row)">删除</el-button>
-            </template>
-          </el-table-column>
-        </el-table>
-      </el-tab-pane>
+            </div>
+          </div>
+        </el-tab-pane>
 
-      <el-tab-pane label="厂商预设（代码内置）" name="presets">
-        <el-table v-loading="presetLoading" :data="presets" border>
-          <el-table-column prop="display_name" label="厂商" width="160" />
-          <el-table-column prop="key" label="键" width="140" />
-          <el-table-column prop="base_url" label="默认基址" min-width="220" />
-          <el-table-column prop="embedding_path" label="Embedding 路径" min-width="160" />
-          <el-table-column label="Embedding" width="100">
-            <template #default="{ row }">
-              <el-tag :type="row.supports_embedding ? 'success' : 'info'">
-                {{ row.supports_embedding ? '支持' : '不支持' }}
-              </el-tag>
-            </template>
-          </el-table-column>
-          <el-table-column label="常见模型" min-width="200">
-            <template #default="{ row }">{{ (row.known_models ?? []).join('、') }}</template>
-          </el-table-column>
-          <el-table-column prop="chat_path" label="Chat 路径" min-width="140" />
-          <el-table-column label="Chat 生成" width="100">
-            <template #default="{ row }">
-              <el-tag :type="row.supports_chat ? 'success' : 'info'">
-                {{ row.supports_chat ? '支持' : '不支持' }}
-              </el-tag>
-            </template>
-          </el-table-column>
-          <el-table-column label="常见生成模型" min-width="180">
-            <template #default="{ row }">{{ (row.known_chat_models ?? []).join('、') }}</template>
-          </el-table-column>
-          <el-table-column prop="rerank_path" label="Rerank 路径" min-width="120" />
-          <el-table-column label="Rerank" width="90">
-            <template #default="{ row }">
-              <el-tag :type="row.supports_rerank ? 'success' : 'info'">
-                {{ row.supports_rerank ? '支持' : '不支持' }}
-              </el-tag>
-            </template>
-          </el-table-column>
-          <el-table-column label="常见重排模型" min-width="170">
-            <template #default="{ row }">
-              {{ (row.known_rerank_models ?? []).join('、') || '—' }}
-            </template>
-          </el-table-column>
-          <el-table-column prop="ocr_path" label="OCR 视觉路径" min-width="140" />
-          <el-table-column prop="ocr_mode" label="OCR 模式" width="110">
-            <template #default="{ row }">{{ ocrModeLabel(row.ocr_mode) }}</template>
-          </el-table-column>
-          <el-table-column label="OCR" width="80">
-            <template #default="{ row }">
-              <el-tag :type="row.supports_ocr ? 'success' : 'info'">
-                {{ row.supports_ocr ? '支持' : '不支持' }}
-              </el-tag>
-            </template>
-          </el-table-column>
-          <el-table-column label="常见 OCR 模型" min-width="200">
-            <template #default="{ row }">
-              {{ (row.known_ocr_models ?? []).join('、') || '—' }}
-            </template>
-          </el-table-column>
-          <el-table-column prop="note" label="说明" min-width="180" />
-        </el-table>
-      </el-tab-pane>
-
-      <el-tab-pane label="计费单价" name="prices">
-        <p class="usage-head">
-          按模型名配置输入/输出 token 单价（元 / 百万 tokens），仪表盘据此核算问答成本；
-          只统计生成阶段，FAQ 直出、未记录 token 的记录以及 embedding / OCR 调用不计费。
-        </p>
-        <div class="toolbar price-toolbar">
-          <el-button type="primary" @click="openPriceCreate()">新增单价</el-button>
-          <div v-if="unpricedChatModels.length" class="price-suggest">
-            <span class="price-suggest-label">当前生成模型未定价：</span>
-            <el-button
-              v-for="item in unpricedChatModels"
-              :key="item.model_name"
-              size="small"
-              @click="openPriceCreate(item.model_name, item.provider)"
-            >
-              {{ item.model_name }}
+        <el-tab-pane label="模型档案" name="profiles">
+          <div class="tab-toolbar">
+            <p class="tab-note">
+              模型档案在大库创建时锁定 · 已被大库/子库绑定的档案不可修改或删除，换模型需新建大库
+            </p>
+            <el-button type="primary" size="small" @click="openCreate">
+              <el-icon><Plus /></el-icon>新建档案
             </el-button>
           </div>
-        </div>
-        <el-table v-loading="priceLoading" :data="prices" border>
-          <el-table-column prop="model_name" label="模型名" min-width="200" />
-          <el-table-column label="供应商" width="140">
-            <template #default="{ row }">{{ row.provider || '—' }}</template>
-          </el-table-column>
-          <el-table-column label="输入单价（元/百万）" width="180" align="right">
-            <template #default="{ row }">{{ formatPrice(row.input_price_per_million) }}</template>
-          </el-table-column>
-          <el-table-column label="输出单价（元/百万）" width="180" align="right">
-            <template #default="{ row }">{{ formatPrice(row.output_price_per_million) }}</template>
-          </el-table-column>
-          <el-table-column label="更新时间" width="170">
-            <template #default="{ row }">{{ formatTime(row.updated_at) }}</template>
-          </el-table-column>
-          <el-table-column label="操作" width="130">
-            <template #default="{ row }">
-              <el-button link type="primary" size="small" @click="openPriceEdit(row)">编辑</el-button>
-              <el-button link type="danger" size="small" @click="deletePrice(row)">删除</el-button>
+          <el-table v-loading="loading" :data="profiles">
+            <template #empty>
+              <EmptyState
+                title="还没有模型档案"
+                text="先在「新建档案」里配置一个 Embedding 或 Chat 模型，知识库才能入库与问答。"
+              />
             </template>
-          </el-table-column>
-        </el-table>
-        <div v-if="!priceLoading && !prices.length" class="usage-empty">
-          尚未配置任何模型单价，仪表盘成本核算会显示为 0。
-        </div>
-      </el-tab-pane>
-    </el-tabs>
+            <el-table-column prop="name" label="名称" min-width="160" />
+            <el-table-column label="类型与用途" width="160">
+              <template #default="{ row }">
+                <div class="kind-cell">
+                  <StatusPill
+                    :label="KIND_META[row.kind as ProfileKind].label"
+                    :tone="KIND_META[row.kind as ProfileKind].tone"
+                    :dot="false"
+                  />
+                  <span class="kind-usage">{{ kindUsage(row.kind) }}</span>
+                </div>
+              </template>
+            </el-table-column>
+            <el-table-column prop="provider" label="服务商" width="130" />
+            <el-table-column prop="model_name" label="模型名" min-width="160" />
+            <el-table-column prop="dimensions" label="维度" width="80" />
+            <el-table-column label="地址与路径" min-width="220">
+              <template #default="{ row }">{{ settingsText(row) }}</template>
+            </el-table-column>
+            <el-table-column label="API Key" width="110">
+              <template #default="{ row }">
+                <StatusPill
+                  :label="row.has_api_key ? '已配置' : '未配置'"
+                  :tone="row.has_api_key ? 'success' : 'info'"
+                />
+              </template>
+            </el-table-column>
+            <el-table-column label="启用" width="70">
+              <template #default="{ row }">
+                <el-switch
+                  :model-value="row.is_enabled"
+                  @change="(v: string | number | boolean) => toggleEnabled(row, v)"
+                />
+              </template>
+            </el-table-column>
+            <el-table-column label="默认" width="70">
+              <template #default="{ row }">
+                <StatusPill v-if="row.is_default" label="默认" tone="danger" :dot="false" />
+              </template>
+            </el-table-column>
+            <el-table-column label="操作" width="360" fixed="right">
+              <template #default="{ row }">
+                <el-button
+                  link
+                  type="success"
+                  size="small"
+                  :loading="testingId === row.id"
+                  @click="testProfile(row)"
+                >
+                  测试连通
+                </el-button>
+                <el-button
+                  v-if="!row.is_default"
+                  link
+                  type="primary"
+                  size="small"
+                  @click="setDefault(row)"
+                >
+                  设为默认
+                </el-button>
+                <el-button v-else link type="info" size="small" @click="clearDefault(row)">
+                  取消默认
+                </el-button>
+                <el-button link type="primary" size="small" @click="openKeyDialog(row)">
+                  配置密钥
+                </el-button>
+                <el-button v-if="row.has_api_key" link type="warning" size="small" @click="clearApiKey(row)">
+                  清除密钥
+                </el-button>
+                <el-button link type="primary" size="small" @click="openEdit(row)">编辑</el-button>
+                <el-button link type="danger" size="small" @click="removeProfile(row)">删除</el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+        </el-tab-pane>
+
+        <el-tab-pane label="厂商预设（代码内置）" name="presets">
+          <el-table v-loading="presetLoading" :data="presets">
+            <template #empty>
+              <EmptyState title="预设未加载" text="厂商预设由代码内置，刷新后仍为空请检查接口。" />
+            </template>
+            <el-table-column prop="display_name" label="厂商" width="160" />
+            <el-table-column prop="key" label="键" width="140" />
+            <el-table-column prop="base_url" label="默认基址" min-width="220" />
+            <el-table-column prop="embedding_path" label="Embedding 路径" min-width="160" />
+            <el-table-column label="Embedding" width="100">
+              <template #default="{ row }">
+                <StatusPill
+                  :label="row.supports_embedding ? '支持' : '不支持'"
+                  :tone="row.supports_embedding ? 'success' : 'info'"
+                  :dot="false"
+                />
+              </template>
+            </el-table-column>
+            <el-table-column label="常见模型" min-width="200">
+              <template #default="{ row }">{{ (row.known_models ?? []).join('、') }}</template>
+            </el-table-column>
+            <el-table-column prop="chat_path" label="Chat 路径" min-width="140" />
+            <el-table-column label="Chat 生成" width="100">
+              <template #default="{ row }">
+                <StatusPill
+                  :label="row.supports_chat ? '支持' : '不支持'"
+                  :tone="row.supports_chat ? 'success' : 'info'"
+                  :dot="false"
+                />
+              </template>
+            </el-table-column>
+            <el-table-column label="常见生成模型" min-width="180">
+              <template #default="{ row }">{{ (row.known_chat_models ?? []).join('、') }}</template>
+            </el-table-column>
+            <el-table-column prop="rerank_path" label="Rerank 路径" min-width="120" />
+            <el-table-column label="Rerank" width="90">
+              <template #default="{ row }">
+                <StatusPill
+                  :label="row.supports_rerank ? '支持' : '不支持'"
+                  :tone="row.supports_rerank ? 'success' : 'info'"
+                  :dot="false"
+                />
+              </template>
+            </el-table-column>
+            <el-table-column label="常见重排模型" min-width="170">
+              <template #default="{ row }">
+                {{ (row.known_rerank_models ?? []).join('、') || '—' }}
+              </template>
+            </el-table-column>
+            <el-table-column prop="ocr_path" label="OCR 视觉路径" min-width="140" />
+            <el-table-column prop="ocr_mode" label="OCR 模式" width="110">
+              <template #default="{ row }">{{ ocrModeLabel(row.ocr_mode) }}</template>
+            </el-table-column>
+            <el-table-column label="OCR" width="80">
+              <template #default="{ row }">
+                <StatusPill
+                  :label="row.supports_ocr ? '支持' : '不支持'"
+                  :tone="row.supports_ocr ? 'success' : 'info'"
+                  :dot="false"
+                />
+              </template>
+            </el-table-column>
+            <el-table-column label="常见 OCR 模型" min-width="200">
+              <template #default="{ row }">
+                {{ (row.known_ocr_models ?? []).join('、') || '—' }}
+              </template>
+            </el-table-column>
+            <el-table-column prop="note" label="说明" min-width="180" />
+          </el-table>
+        </el-tab-pane>
+
+        <el-tab-pane label="计费单价" name="prices">
+          <div class="tab-body price-head">
+            <p class="tab-note">
+              按模型名配置输入/输出 token 单价（元 / 百万 tokens），仪表盘据此核算问答成本；
+              只统计生成阶段，FAQ 直出、未记录 token 的记录以及 embedding / OCR 调用不计费。
+            </p>
+            <div class="price-toolbar">
+              <el-button type="primary" size="small" @click="openPriceCreate()">
+                <el-icon><Plus /></el-icon>新增单价
+              </el-button>
+              <div v-if="unpricedChatModels.length" class="price-suggest">
+                <span class="price-suggest-label">当前生成模型未定价：</span>
+                <el-button
+                  v-for="item in unpricedChatModels"
+                  :key="item.model_name"
+                  size="small"
+                  @click="openPriceCreate(item.model_name, item.provider)"
+                >
+                  {{ item.model_name }}
+                </el-button>
+              </div>
+            </div>
+          </div>
+          <el-table v-loading="priceLoading" :data="prices">
+            <template #empty>
+              <EmptyState
+                title="还没有模型单价"
+                text="未配置单价时仪表盘成本核算为 0；点「新增单价」按模型名补充即可。"
+              />
+            </template>
+            <el-table-column prop="model_name" label="模型名" min-width="200" />
+            <el-table-column label="供应商" width="140">
+              <template #default="{ row }">{{ row.provider || '—' }}</template>
+            </el-table-column>
+            <el-table-column label="输入单价（元/百万）" width="180" align="right">
+              <template #default="{ row }">{{ formatPrice(row.input_price_per_million) }}</template>
+            </el-table-column>
+            <el-table-column label="输出单价（元/百万）" width="180" align="right">
+              <template #default="{ row }">{{ formatPrice(row.output_price_per_million) }}</template>
+            </el-table-column>
+            <el-table-column label="更新时间" width="170">
+              <template #default="{ row }">{{ formatTime(row.updated_at) }}</template>
+            </el-table-column>
+            <el-table-column label="操作" width="130">
+              <template #default="{ row }">
+                <el-button link type="primary" size="small" @click="openPriceEdit(row)">编辑</el-button>
+                <el-button link type="danger" size="small" @click="deletePrice(row)">删除</el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+        </el-tab-pane>
+      </el-tabs>
+    </DataPanel>
 
     <el-dialog
       v-model="dialogVisible"
@@ -1182,26 +1236,48 @@ onMounted(() => {
         <el-button type="primary" :loading="priceSubmitting" @click="submitPrice">保存</el-button>
       </template>
     </el-dialog>
-  </el-card>
+  </div>
 </template>
 
 <style scoped>
-.header {
+.header-count {
+  font-size: var(--kb-font-xs);
+  color: var(--el-text-color-secondary);
+  font-variant-numeric: tabular-nums;
+}
+.tabs-panel {
+  overflow: hidden;
+}
+/* 页签条与面板头左右对齐；表格保持贴边，由各 tab 自己控制说明区留白。 */
+.tabs-panel :deep(.el-tabs__header) {
+  margin: 0;
+  padding: 0 18px;
+}
+.tabs-panel :deep(.el-tabs__nav-wrap::after) {
+  height: 1px;
+  background: var(--el-border-color-lighter);
+}
+.tab-body {
+  padding: 16px 18px;
+}
+.tab-toolbar {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 12px;
+  padding: 14px 18px 12px;
 }
-.header-title {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  color: var(--el-color-primary);
+.tab-note {
+  margin: 0 0 4px;
+  font-size: var(--kb-font-xs);
+  line-height: 1.6;
+  color: var(--el-text-color-secondary);
 }
-.tip {
-  margin-bottom: 12px;
-}
-.toolbar {
-  margin-bottom: 12px;
+.price-head {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding-bottom: 12px;
 }
 /* 新增按钮与未定价模型快捷入口保持单行，窄屏时让快捷项自行换行。 */
 .price-toolbar {
@@ -1217,12 +1293,7 @@ onMounted(() => {
   flex-wrap: wrap;
 }
 .price-suggest-label {
-  font-size: 12px;
-  color: var(--el-text-color-secondary);
-}
-.usage-head {
-  margin: 0 0 8px;
-  font-size: 12px;
+  font-size: var(--kb-font-xs);
   color: var(--el-text-color-secondary);
 }
 .usage-list {
@@ -1237,7 +1308,7 @@ onMounted(() => {
 }
 .usage-row:first-child {
   border-top: none;
-  padding-top: 4px;
+  padding-top: 8px;
 }
 .usage-slot-title {
   display: flex;
@@ -1270,7 +1341,7 @@ onMounted(() => {
   padding: 10px 14px;
   border: 1px solid var(--el-border-color-lighter);
   border-radius: 8px;
-  background: var(--el-fill-color-very-light);
+  background: var(--el-fill-color-light);
 }
 .usage-model.is-inactive {
   opacity: 0.62;
@@ -1332,6 +1403,15 @@ onMounted(() => {
   .usage-row {
     grid-template-columns: minmax(0, 1fr);
     gap: 10px;
+  }
+  .tabs-panel :deep(.el-tabs__header) {
+    padding: 0 12px;
+  }
+  .tab-body {
+    padding: 14px 12px;
+  }
+  .tab-toolbar {
+    padding: 12px 12px 10px;
   }
 }
 .key-hint {

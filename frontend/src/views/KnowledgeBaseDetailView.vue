@@ -7,6 +7,10 @@ import { client, errorMessage, errorText } from '../api/client'
 import { canWrite, isFullAdmin } from '../api/session'
 import FaqPanel from '../components/FaqPanel.vue'
 import DocumentPreviewDrawer from '../components/DocumentPreviewDrawer.vue'
+import DataPanel from '../components/ui/DataPanel.vue'
+import EmptyState from '../components/ui/EmptyState.vue'
+import PageHeader from '../components/ui/PageHeader.vue'
+import StatusPill from '../components/ui/StatusPill.vue'
 import { resolveInlineImages } from '../utils/assets'
 import { escapeHtml, renderMarkdown } from '../utils/markdown'
 
@@ -482,15 +486,29 @@ const productNames = computed(() => {
 })
 
 // 型号选项跟随已选产品名称联动：未选产品时展示全部，选中后只展示对应型号。
-const modelNames = computed(() => {
-  const selected = new Set(uploadDialog.productNames)
+function modelOptionsFor(products: string[]): string[] {
+  const selected = new Set(products)
   const names = new Set(
     catalogEntries.value
       .filter((entry) => selected.size === 0 || selected.has(entry.product_name))
       .map((entry) => entry.model_name),
   )
   return [...names].sort((a, b) => a.localeCompare(b, 'zh'))
-})
+}
+
+// 换产品后剔除不再属于所选产品的型号，避免提交时被目录校验拒绝。
+function pruneModels(products: string[], models: string[]): string[] {
+  const selected = new Set(products)
+  if (selected.size === 0) return models
+  const valid = new Set(
+    catalogEntries.value
+      .filter((entry) => selected.has(entry.product_name))
+      .map((entry) => entry.model_name),
+  )
+  return models.filter((name) => valid.has(name))
+}
+
+const modelNames = computed(() => modelOptionsFor(uploadDialog.productNames))
 
 async function loadCatalogOptions() {
   const { data } = await client.get<CatalogEntry[]>('/product-catalog')
@@ -588,18 +606,10 @@ function openReplaceDialog(document: DocumentItem) {
   void loadCatalogOptions().catch(() => undefined)
 }
 
-// 换产品时清掉不再属于所选产品的已选型号，避免提交时被目录校验拒绝。
 watch(
   () => uploadDialog.productNames,
   (products) => {
-    const selected = new Set(products)
-    if (selected.size === 0) return
-    const valid = new Set(
-      catalogEntries.value
-        .filter((entry) => selected.has(entry.product_name))
-        .map((entry) => entry.model_name),
-    )
-    uploadDialog.modelNames = uploadDialog.modelNames.filter((name) => valid.has(name))
+    uploadDialog.modelNames = pruneModels(products, uploadDialog.modelNames)
   },
 )
 
@@ -770,6 +780,76 @@ async function submitUpload() {
     await reloadFiles()
   } finally {
     uploadDialog.submitting = false
+  }
+}
+
+// —— 修改产品标签（入库后覆盖写入，单个与批量共用） ——
+
+const labelDialog = reactive({
+  visible: false,
+  submitting: false,
+  targets: [] as DocumentItem[],
+  productNames: [] as string[],
+  modelNames: [] as string[],
+  general: false,
+})
+
+const labelModelNames = computed(() => modelOptionsFor(labelDialog.productNames))
+
+function openLabelDialog(targets: DocumentItem[]) {
+  if (targets.length === 0) return
+  labelDialog.targets = targets
+  // 以第一个文件为起点预填；批量时统一覆盖成这组标签，弹窗内会明示影响范围。
+  const first = targets[0]
+  labelDialog.productNames = [...first.product_names]
+  labelDialog.modelNames = [...first.model_names]
+  labelDialog.general =
+    first.product_names.length === 0 && first.model_names.length === 0
+  labelDialog.visible = true
+  void loadCatalogOptions().catch(() => undefined)
+}
+
+watch(
+  () => labelDialog.productNames,
+  (products) => {
+    labelDialog.modelNames = pruneModels(products, labelDialog.modelNames)
+  },
+)
+
+async function submitLabelUpdate() {
+  const productNames = labelDialog.productNames.map((value) => value.trim()).filter(Boolean)
+  const modelNames = labelDialog.modelNames.map((value) => value.trim()).filter(Boolean)
+  if (!labelDialog.general && productNames.length === 0) {
+    ElMessage.warning('请选择产品名称，或勾选「通用资料」清空标签')
+    return
+  }
+  if (!labelDialog.general && modelNames.length === 0) {
+    ElMessage.warning('请选择产品型号，或勾选「通用资料」清空标签')
+    return
+  }
+  const payload = {
+    product_names: labelDialog.general ? [] : productNames,
+    model_names: labelDialog.general ? [] : modelNames,
+  }
+  const count = labelDialog.targets.length
+  labelDialog.submitting = true
+  try {
+    if (count === 1) {
+      await client.patch(`/documents/${labelDialog.targets[0].id}/product-labels`, payload)
+    } else {
+      await client.post('/documents/product-labels/batch', {
+        document_ids: labelDialog.targets.map((document) => document.id),
+        ...payload,
+      })
+    }
+    ElMessage.success(count > 1 ? `已更新 ${count} 个文件的标签` : '产品标签已更新')
+    labelDialog.visible = false
+    documentTableRef.value?.clearSelection()
+    await loadDocuments()
+  } catch (error) {
+    errorMessage(error, '更新产品标签失败')
+  } finally {
+    labelDialog.submitting = false
   }
 }
 
@@ -1069,18 +1149,23 @@ onMounted(async () => {
 </script>
 
 <template>
-  <el-card v-if="kb" class="detail-card">
-    <template #header>
-      <div class="detail-head">
-        <el-button text :icon="'Back'" @click="router.push('/kbs')">返回</el-button>
-        <span class="kb-title">{{ kb.name }}</span>
-        <el-tag v-if="kb.status === 'active'" type="success" size="small">启用</el-tag>
-        <el-tag v-else type="info" size="small">{{ kb.status }}</el-tag>
-        <span v-if="kb.description" class="kb-desc">{{ kb.description }}</span>
-      </div>
-    </template>
+  <div v-if="kb" class="kb-detail-page">
+    <PageHeader :title="kb.name" eyebrow="知识库详情" :subtitle="kb.description || undefined">
+      <template #meta>
+        <StatusPill
+          :label="kb.status === 'active' ? '启用中' : '已归档'"
+          :tone="kb.status === 'active' ? 'success' : 'info'"
+        />
+        <span class="header-meta">更新于 {{ formatDateTime(kb.updated_at) }}</span>
+      </template>
+      <template #actions>
+        <el-button size="small" @click="router.push('/kbs')">
+          <el-icon><Back /></el-icon>返回列表
+        </el-button>
+      </template>
+    </PageHeader>
 
-    <el-tabs v-model="activeTab">
+    <el-tabs v-model="activeTab" class="detail-tabs">
       <el-tab-pane label="文件" name="files">
         <el-alert
           v-if="kb.status !== 'active'"
@@ -1091,9 +1176,8 @@ onMounted(async () => {
           class="tab-alert"
         />
         <div class="files-layout">
-          <div class="folder-panel">
-            <div class="panel-head">
-              <span>目录</span>
+          <DataPanel class="folder-panel" title="目录" flush>
+            <template #actions>
               <el-button
                 v-if="canWrite && kb.status === 'active'"
                 size="small"
@@ -1104,74 +1188,79 @@ onMounted(async () => {
               >
                 新建目录
               </el-button>
+            </template>
+            <div class="tree-body">
+              <el-tree
+                :data="tree"
+                node-key="id"
+                highlight-current
+                :current-node-key="currentFolderId"
+                :expand-on-click-node="false"
+                default-expand-all
+                @node-click="(node: TreeNode) => (currentFolderId = node.id)"
+              >
+                <template #default="{ data }">
+                  <div class="tree-node">
+                    <el-icon><Folder /></el-icon>
+                    <span class="node-label">{{ data.label }}</span>
+                    <el-dropdown
+                      v-if="canWrite && kb.status === 'active'"
+                      trigger="click"
+                      class="node-more"
+                      @command="(command: string) => onFolderCommand(command, data)"
+                    >
+                      <el-icon><MoreFilled /></el-icon>
+                      <template #dropdown>
+                        <el-dropdown-menu>
+                          <el-dropdown-item command="new">新建子目录</el-dropdown-item>
+                          <el-dropdown-item v-if="data.id" command="rename">重命名</el-dropdown-item>
+                          <el-dropdown-item v-if="data.id" command="delete" divided>删除</el-dropdown-item>
+                        </el-dropdown-menu>
+                      </template>
+                    </el-dropdown>
+                  </div>
+                </template>
+              </el-tree>
             </div>
-            <el-tree
-              :data="tree"
-              node-key="id"
-              highlight-current
-              :current-node-key="currentFolderId"
-              :expand-on-click-node="false"
-              default-expand-all
-              @node-click="(node: TreeNode) => (currentFolderId = node.id)"
-            >
-              <template #default="{ data }">
-                <div class="tree-node">
-                  <el-icon><Folder /></el-icon>
-                  <span class="node-label">{{ data.label }}</span>
-                  <el-dropdown
-                    v-if="canWrite && kb.status === 'active'"
-                    trigger="click"
-                    class="node-more"
-                    @command="(command: string) => onFolderCommand(command, data)"
-                  >
-                    <el-icon><MoreFilled /></el-icon>
-                    <template #dropdown>
-                      <el-dropdown-menu>
-                        <el-dropdown-item command="new">新建子目录</el-dropdown-item>
-                        <el-dropdown-item v-if="data.id" command="rename">重命名</el-dropdown-item>
-                        <el-dropdown-item v-if="data.id" command="delete" divided>删除</el-dropdown-item>
-                      </el-dropdown-menu>
-                    </template>
-                  </el-dropdown>
-                </div>
-              </template>
-            </el-tree>
-          </div>
+          </DataPanel>
 
-          <div class="document-panel" v-loading="loading">
-            <div class="panel-head">
-              <span>
-                文件
-                <span class="panel-count">{{ documentTotal }}</span>
-              </span>
-              <div class="panel-actions">
-                <el-button
-                  v-if="canWrite && kb.status === 'active' && selectedDocuments.length > 0"
-                  size="small"
-                  type="danger"
-                  plain
-                  :icon="'Delete'"
-                  @click="batchDeleteDocuments"
-                >
-                  批量删除（{{ selectedDocuments.length }}）
-                </el-button>
-                <el-button
-                  v-if="canWrite && kb.status === 'active' && kb.company_id"
-                  size="small"
-                  type="primary"
-                  :icon="'Upload'"
-                  @click="openUploadDialog"
-                >
-                  上传文件
-                </el-button>
-                <el-tooltip
-                  v-else-if="canWrite && kb.status === 'active'"
-                  content="该知识库缺少公司归属，无法上传文件"
-                >
-                  <el-button size="small" type="primary" disabled>上传文件</el-button>
-                </el-tooltip>
-              </div>
-            </div>
+          <DataPanel v-loading="loading" class="document-panel" title="文件" :count="`${documentTotal} 份`" flush>
+            <template #actions>
+              <el-button
+                v-if="canWrite && kb.status === 'active' && selectedDocuments.length > 0"
+                size="small"
+                plain
+                :icon="'EditPen'"
+                @click="openLabelDialog(selectedDocuments)"
+              >
+                批量改标签（{{ selectedDocuments.length }}）
+              </el-button>
+              <el-button
+                v-if="canWrite && kb.status === 'active' && selectedDocuments.length > 0"
+                size="small"
+                type="danger"
+                plain
+                :icon="'Delete'"
+                @click="batchDeleteDocuments"
+              >
+                批量删除（{{ selectedDocuments.length }}）
+              </el-button>
+              <el-button
+                v-if="canWrite && kb.status === 'active' && kb.company_id"
+                size="small"
+                type="primary"
+                :icon="'Upload'"
+                @click="openUploadDialog"
+              >
+                上传文件
+              </el-button>
+              <el-tooltip
+                v-else-if="canWrite && kb.status === 'active'"
+                content="该知识库缺少公司归属，无法上传文件"
+              >
+                <el-button size="small" type="primary" disabled>上传文件</el-button>
+              </el-tooltip>
+            </template>
             <div class="document-toolbar">
               <el-input
                 v-model="documentSearch"
@@ -1192,11 +1281,20 @@ onMounted(async () => {
               :data="documents"
               row-key="id"
               size="small"
-              empty-text="当前目录暂无文件"
               @selection-change="onSelectionChange"
             >
+              <template #empty>
+                <EmptyState
+                  :title="documentSearch.trim() ? '没有匹配的文件' : '当前目录暂无文件'"
+                  :text="
+                    documentSearch.trim()
+                      ? '换个关键词试试，搜索范围覆盖整个知识库。'
+                      : '换个目录，或用上方搜索框在全库查找文件名。'
+                  "
+                />
+              </template>
               <el-table-column type="selection" width="40" :selectable="() => canWrite && kb !== null && kb.status === 'active'" />
-              <el-table-column prop="filename" label="文件名" min-width="220" show-overflow-tooltip />
+              <el-table-column prop="filename" label="文件名" min-width="200" show-overflow-tooltip />
               <el-table-column label="状态" width="120">
                 <template #default="{ row }">
                   <div class="status-cell">
@@ -1205,9 +1303,9 @@ onMounted(async () => {
                       :content="row.error_message"
                       placement="top"
                     >
-                      <el-tag :type="statusOf(row).type" size="small">{{ statusOf(row).label }}</el-tag>
+                      <StatusPill :label="statusOf(row).label" :tone="statusOf(row).type" :dot="false" />
                     </el-tooltip>
-                    <el-tag v-else :type="statusOf(row).type" size="small">{{ statusOf(row).label }}</el-tag>
+                    <StatusPill v-else :label="statusOf(row).label" :tone="statusOf(row).type" />
                     <el-button
                       v-if="row.status === 'failed'"
                       size="small"
@@ -1221,6 +1319,40 @@ onMounted(async () => {
                 </template>
               </el-table-column>
               <el-table-column prop="latest_version_number" label="版本" width="60" />
+              <el-table-column label="产品名称" min-width="150">
+                <template #default="{ row }">
+                  <div class="label-cell">
+                    <span v-if="row.product_names.length" class="label-text">{{ row.product_names.join('、') }}</span>
+                    <span v-else class="label-text label-muted">未标注</span>
+                    <el-button
+                      v-if="canWrite && kb.status === 'active'"
+                      class="label-edit"
+                      size="small"
+                      text
+                      :icon="'Edit'"
+                      aria-label="修改产品标签"
+                      @click.stop="openLabelDialog([row])"
+                    />
+                  </div>
+                </template>
+              </el-table-column>
+              <el-table-column label="产品型号" min-width="160">
+                <template #default="{ row }">
+                  <div class="label-cell">
+                    <span v-if="row.model_names.length" class="label-text">{{ row.model_names.join('、') }}</span>
+                    <span v-else class="label-text label-muted">未标注</span>
+                    <el-button
+                      v-if="canWrite && kb.status === 'active'"
+                      class="label-edit"
+                      size="small"
+                      text
+                      :icon="'Edit'"
+                      aria-label="修改产品标签"
+                      @click.stop="openLabelDialog([row])"
+                    />
+                  </div>
+                </template>
+              </el-table-column>
               <el-table-column label="更新时间" width="150">
                 <template #default="{ row }">{{ formatDateTime(row.updated_at) }}</template>
               </el-table-column>
@@ -1257,7 +1389,7 @@ onMounted(async () => {
                 </template>
               </el-table-column>
             </el-table>
-            <div v-if="documentTotal > documentPageSize" class="document-pager">
+            <template v-if="documentTotal > documentPageSize" #footer>
               <el-pagination
                 layout="total, prev, pager, next"
                 :total="documentTotal"
@@ -1265,84 +1397,86 @@ onMounted(async () => {
                 :current-page="documentPage"
                 @current-change="onDocumentPageChange"
               />
-            </div>
-          </div>
+            </template>
+          </DataPanel>
         </div>
       </el-tab-pane>
 
       <el-tab-pane v-if="isFullAdmin" label="配置" name="config">
         <div class="config-panel">
-          <el-form label-width="130px" class="config-form">
-            <el-form-item label="知识库名称" required>
-              <el-input v-model="configForm.name" maxlength="160" show-word-limit />
-            </el-form-item>
-            <el-form-item label="说明">
-              <el-input
-                v-model="configForm.description"
-                type="textarea"
-                :rows="2"
-                maxlength="1000"
-                placeholder="可选；留空表示清空说明"
-              />
-            </el-form-item>
-            <el-divider content-position="left">分块参数</el-divider>
-            <el-form-item label="父块字符数">
-              <el-input-number
-                v-model="configForm.parentChars"
-                :min="1"
-                :step="100"
-                :value-on-clear="null"
-                placeholder="留空跟随全局"
-              />
-            </el-form-item>
-            <el-form-item label="子块字符数">
-              <el-input-number
-                v-model="configForm.childChars"
-                :min="1"
-                :step="100"
-                :value-on-clear="null"
-                placeholder="留空跟随全局"
-              />
-            </el-form-item>
-            <el-form-item label="子块重叠数">
-              <el-input-number
-                v-model="configForm.overlapChars"
-                :min="0"
-                :step="10"
-                :value-on-clear="null"
-                placeholder="留空跟随全局"
-              />
-            </el-form-item>
-            <el-form-item>
-              <span class="config-hint">{{ chunkDefaultsHint }}</span>
-            </el-form-item>
-            <el-divider content-position="left">模型</el-divider>
-            <el-form-item label="Embedding">
-              <el-input :model-value="profileName(kb.embedding_model_id)" disabled />
-            </el-form-item>
-            <el-form-item label="Rerank">
-              <el-input :model-value="profileName(kb.rerank_model_id)" disabled />
-            </el-form-item>
-            <el-form-item>
-              <el-alert
-                type="info"
-                :closable="false"
-                show-icon
-                title="模型在大库创建时锁定，已有文档的库不能更换模型；如需更换请新建大库。"
-              />
-            </el-form-item>
-            <el-form-item>
-              <el-button
-                type="primary"
-                :loading="configForm.saving"
-                :disabled="kb.status !== 'active'"
-                @click="saveConfig"
-              >
-                保存配置
-              </el-button>
-              <span v-if="kb.status !== 'active'" class="config-hint">知识库已归档，不可修改</span>
-            </el-form-item>
-          </el-form>
+          <DataPanel title="知识库配置" subtitle="分块参数留空则跟随全局设置">
+            <el-form label-width="130px" class="config-form">
+              <el-form-item label="知识库名称" required>
+                <el-input v-model="configForm.name" maxlength="160" show-word-limit />
+              </el-form-item>
+              <el-form-item label="说明">
+                <el-input
+                  v-model="configForm.description"
+                  type="textarea"
+                  :rows="2"
+                  maxlength="1000"
+                  placeholder="可选；留空表示清空说明"
+                />
+              </el-form-item>
+              <el-divider content-position="left">分块参数</el-divider>
+              <el-form-item label="父块字符数">
+                <el-input-number
+                  v-model="configForm.parentChars"
+                  :min="1"
+                  :step="100"
+                  :value-on-clear="null"
+                  placeholder="留空跟随全局"
+                />
+              </el-form-item>
+              <el-form-item label="子块字符数">
+                <el-input-number
+                  v-model="configForm.childChars"
+                  :min="1"
+                  :step="100"
+                  :value-on-clear="null"
+                  placeholder="留空跟随全局"
+                />
+              </el-form-item>
+              <el-form-item label="子块重叠数">
+                <el-input-number
+                  v-model="configForm.overlapChars"
+                  :min="0"
+                  :step="10"
+                  :value-on-clear="null"
+                  placeholder="留空跟随全局"
+                />
+              </el-form-item>
+              <el-form-item>
+                <span class="config-hint">{{ chunkDefaultsHint }}</span>
+              </el-form-item>
+              <el-divider content-position="left">模型</el-divider>
+              <el-form-item label="Embedding">
+                <el-input :model-value="profileName(kb.embedding_model_id)" disabled />
+              </el-form-item>
+              <el-form-item label="Rerank">
+                <el-input :model-value="profileName(kb.rerank_model_id)" disabled />
+              </el-form-item>
+              <el-form-item>
+                <el-alert
+                  type="info"
+                  :closable="false"
+                  show-icon
+                  title="模型在大库创建时锁定，已有文档的库不能更换模型；如需更换请新建大库。"
+                />
+              </el-form-item>
+              <el-form-item>
+                <el-button
+                  type="primary"
+                  :loading="configForm.saving"
+                  :disabled="kb.status !== 'active'"
+                  @click="saveConfig"
+                >
+                  保存配置
+                </el-button>
+                <span v-if="kb.status !== 'active'" class="config-hint">知识库已归档，不可修改</span>
+              </el-form-item>
+            </el-form>
+          </DataPanel>
         </div>
       </el-tab-pane>
 
@@ -1533,6 +1667,74 @@ onMounted(async () => {
       </template>
     </el-dialog>
 
+    <!-- 修改产品标签：覆盖写入，保存后立即影响检索范围 -->
+    <el-dialog
+      v-model="labelDialog.visible"
+      :title="labelDialog.targets.length > 1 ? '批量修改产品标签' : '修改产品标签'"
+      width="500px"
+      :close-on-click-modal="false"
+    >
+      <div class="label-dialog">
+        <div class="label-target">
+          <template v-if="labelDialog.targets.length === 1">
+            <span class="label-target-name">{{ labelDialog.targets[0].filename }}</span>
+          </template>
+          <template v-else>
+            <span class="label-target-name">
+              将统一覆盖 {{ labelDialog.targets.length }} 个文件的标签
+            </span>
+            <span class="label-target-names">
+              {{ labelDialog.targets.map((document) => document.filename).join('、') }}
+            </span>
+          </template>
+        </div>
+        <div class="upload-field">
+          <el-checkbox v-model="labelDialog.general" class="general-check">
+            通用资料（清空产品名称与型号）
+          </el-checkbox>
+        </div>
+        <div class="upload-field">
+          <label class="upload-label">
+            产品名称<span v-if="!labelDialog.general" class="required-mark">*</span>
+          </label>
+          <el-select
+            v-model="labelDialog.productNames"
+            multiple
+            filterable
+            :disabled="labelDialog.general"
+            placeholder="从全局产品目录中选择，可多选"
+            style="width: 100%"
+          >
+            <el-option v-for="name in productNames" :key="name" :label="name" :value="name" />
+          </el-select>
+        </div>
+        <div class="upload-field">
+          <label class="upload-label">
+            产品型号<span v-if="!labelDialog.general" class="required-mark">*</span>
+          </label>
+          <el-select
+            v-model="labelDialog.modelNames"
+            multiple
+            filterable
+            :disabled="labelDialog.general"
+            placeholder="从全局产品目录中选择，可多选"
+            style="width: 100%"
+          >
+            <el-option v-for="name in labelModelNames" :key="name" :label="name" :value="name" />
+          </el-select>
+        </div>
+        <p class="upload-hint">
+          保存后立即影响检索过滤、型号澄清与 FAQ 匹配范围，不会重新解析文件，也不会重建向量。目录里没有需要的标签时，请先到左侧「产品目录」登记。
+        </p>
+      </div>
+      <template #footer>
+        <el-button @click="labelDialog.visible = false">取消</el-button>
+        <el-button type="primary" :loading="labelDialog.submitting" @click="submitLabelUpdate">
+          保存
+        </el-button>
+      </template>
+    </el-dialog>
+
     <!-- 移动文档 -->
     <el-dialog v-model="moveDialog.visible" title="移动文档" width="420px">
       <p class="dialog-tip">
@@ -1704,40 +1906,35 @@ onMounted(async () => {
       :item="previewItem"
       @download="downloadFile"
     />
-  </el-card>
+  </div>
 </template>
 
 <style scoped>
-.detail-card {
-  min-height: calc(100vh - 96px);
-}
-.detail-head {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-.kb-title {
-  font-size: 16px;
-  font-weight: 600;
-}
-.kb-desc {
+.header-meta {
+  font-size: var(--kb-font-xs);
   color: var(--el-text-color-secondary);
-  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+.detail-tabs :deep(.el-tabs__header) {
+  margin: 0 0 12px;
 }
 .tab-alert {
   margin-bottom: 12px;
 }
 .files-layout {
   display: flex;
-  gap: 16px;
+  align-items: stretch;
+  gap: 14px;
   min-height: 420px;
 }
 .folder-panel {
   width: 260px;
   flex-shrink: 0;
-  border: 1px solid var(--el-border-color-light);
-  border-radius: 4px;
-  padding: 8px;
+}
+.tree-body {
+  padding: 10px 12px 14px;
+  max-height: 560px;
+  overflow: auto;
 }
 .document-panel {
   flex: 1;
@@ -1757,36 +1954,14 @@ onMounted(async () => {
 .file-actions :deep(.el-button + .el-button) {
   margin-left: 6px;
 }
-.panel-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 8px;
-  font-weight: 600;
-}
-.panel-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.panel-count {
-  color: var(--el-text-color-secondary);
-  font-weight: 400;
-  margin-left: 4px;
-}
 .document-toolbar {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-bottom: 8px;
+  padding: 12px 18px 10px;
 }
 .document-search {
   width: 280px;
-}
-.document-pager {
-  display: flex;
-  justify-content: flex-end;
-  margin-top: 10px;
 }
 .tree-node {
   display: flex;
@@ -1807,6 +1982,17 @@ onMounted(async () => {
 }
 .tree-node:hover .node-more {
   visibility: visible;
+}
+@media (max-width: 900px) {
+  .files-layout {
+    flex-direction: column;
+  }
+  .folder-panel {
+    width: auto;
+  }
+  .tree-body {
+    max-height: 220px;
+  }
 }
 .dialog-tip {
   margin: 0 0 8px;
@@ -2077,6 +2263,57 @@ onMounted(async () => {
   align-items: center;
   gap: 2px;
 }
+.label-muted {
+  color: var(--el-text-color-placeholder);
+}
+/* 标签单元格：文本截断，编辑入口平时淡显，悬停行内变清晰。 */
+.label-cell {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+.label-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.label-edit {
+  flex: none;
+  padding: 0 2px;
+  color: var(--el-text-color-placeholder);
+  opacity: 0.35;
+  transition: opacity 0.15s ease, color 0.15s ease;
+}
+.el-table__row:hover .label-edit,
+.label-edit:focus-visible {
+  color: var(--el-color-primary);
+  opacity: 1;
+}
+.label-target {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 12px;
+  margin-bottom: 14px;
+  border-radius: 10px;
+  background: var(--el-fill-color-lighter);
+  border-left: 3px solid var(--el-color-primary-light-5);
+}
+.label-target-name {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--el-text-color-primary);
+}
+.label-target-names {
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .ingestion-detail {
   min-height: 120px;
 }
@@ -2105,8 +2342,7 @@ onMounted(async () => {
   font-family: var(--el-font-family-monospace, monospace);
 }
 .config-panel {
-  max-width: 640px;
-  padding: 8px 4px;
+  max-width: 760px;
 }
 .quick-add {
   margin: 2px 0 10px;

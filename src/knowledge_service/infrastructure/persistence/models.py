@@ -178,12 +178,20 @@ class AdminCredential(TimestampMixin, Base):
     __tablename__ = "admin_credentials"
     __table_args__ = (
         UniqueConstraint("token_hash", name="uq_admin_credentials_token_hash"),
+        Index("ix_admin_credentials_username", "username", unique=True),
         {"mysql_engine": "InnoDB", "comment": "管理员访问凭据，仅保存哈希"},
     )
 
     id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
     name: Mapped[str] = mapped_column(String(120), nullable=False)
     token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    # 账号密码登录用；未设置账号或密码的管理员只能用长期 Token 进入。
+    username: Mapped[str | None] = mapped_column(
+        String(60), comment="登录账号，唯一；NULL 表示未开通账号密码登录"
+    )
+    password_hash: Mapped[str | None] = mapped_column(
+        String(255), comment="PBKDF2 密码哈希，不保存明文"
+    )
     is_enabled: Mapped[bool] = mapped_column(
         Boolean, default=True, server_default=text("1"), nullable=False
     )
@@ -191,6 +199,27 @@ class AdminCredential(TimestampMixin, Base):
     role: Mapped[str] = mapped_column(
         String(20), default="admin", server_default=text("'admin'"), nullable=False
     )
+
+
+class AdminSession(TimestampMixin, Base):
+    """账号密码登录换发的短期会话凭据；只存哈希，停用凭据或改密即失效。"""
+
+    __tablename__ = "admin_sessions"
+    __table_args__ = (
+        UniqueConstraint("token_hash", name="uq_admin_sessions_token_hash"),
+        Index("ix_admin_sessions_credential_id", "credential_id"),
+        Index("ix_admin_sessions_expires_at", "expires_at"),
+        {"mysql_engine": "InnoDB", "comment": "管理端登录会话"},
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    credential_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("admin_credentials.id", ondelete="CASCADE"), nullable=False
+    )
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    # 记录来源 IP 便于排查异常登录，不参与鉴权判定。
+    client_ip: Mapped[str | None] = mapped_column(String(64), comment="登录时的客户端 IP")
 
 
 class AuditLog(TimestampMixin, Base):

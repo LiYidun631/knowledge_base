@@ -23,6 +23,9 @@ from knowledge_service.api.v1.schemas import (
     DocumentFolderPatch,
     DocumentFolderRead,
     DocumentLinkIngestionRequest,
+    DocumentProductLabelsBatchPatch,
+    DocumentProductLabelsPatch,
+    DocumentProductLabelsResult,
     DocumentRead,
     DocumentUpdate,
     DocumentVersionRead,
@@ -53,6 +56,7 @@ from knowledge_service.application.documents.upload import (
 from knowledge_service.application.search.service import document_product_labels
 from knowledge_service.core.config import get_settings
 from knowledge_service.domain.errors import (
+    DocumentNotFound,
     FolderNameConflict,
     FolderNotEmpty,
     FolderNotFound,
@@ -1311,6 +1315,85 @@ async def move_document(
             status_code=status.HTTP_409_CONFLICT, detail="知识库已归档，不能移动文档"
         ) from exc
     return DocumentRead.model_validate(document)
+
+
+@router.patch(
+    "/documents/{document_id}/product-labels",
+    response_model=DocumentRead,
+    summary="修改文档的产品名称与型号",
+    description=(
+        "覆盖文档的产品名称与型号标签，立即影响检索过滤、型号澄清与 FAQ 匹配范围；"
+        "不会重新解析文件，也不重建向量。传空列表表示清空标签（按通用资料参与检索）。"
+    ),
+)
+async def update_document_product_labels(
+    document_id: Annotated[UUID, ApiPath(description="逻辑文档 ID。")],
+    payload: DocumentProductLabelsPatch,
+    session: Annotated[AsyncSession, Depends(get_db_session, scope="function")],
+) -> DocumentRead:
+    products, models = _normalize_product_lists(
+        None, None, payload.product_names, payload.model_names
+    )
+    await _validate_catalog_labels(session, products, models)
+    try:
+        documents = await service.update_product_labels(
+            session,
+            document_ids=[document_id],
+            product_names=products,
+            model_names=models,
+        )
+    except DocumentNotFound as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="文档不存在") from exc
+    except KnowledgeBaseArchived as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail="知识库已归档，不能修改文档标签"
+        ) from exc
+    except KnowledgeBaseNotFound as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="文档所属知识库不存在"
+        ) from exc
+    document = documents[0]
+    read = DocumentRead.model_validate(document)
+    read.product_names, read.model_names = document_product_labels(document.extra_metadata)
+    return read
+
+
+@router.post(
+    "/documents/product-labels/batch",
+    response_model=DocumentProductLabelsResult,
+    summary="批量修改文档的产品名称与型号",
+    description=(
+        "对多个文档覆盖同一组产品名称与型号标签；任一文档不存在或所属知识库已归档时整批不生效。"
+    ),
+)
+async def batch_update_document_product_labels(
+    payload: DocumentProductLabelsBatchPatch,
+    session: Annotated[AsyncSession, Depends(get_db_session, scope="function")],
+) -> DocumentProductLabelsResult:
+    products, models = _normalize_product_lists(
+        None, None, payload.product_names, payload.model_names
+    )
+    await _validate_catalog_labels(session, products, models)
+    try:
+        documents = await service.update_product_labels(
+            session,
+            document_ids=list(dict.fromkeys(payload.document_ids)),
+            product_names=products,
+            model_names=models,
+        )
+    except DocumentNotFound as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="部分文档不存在，请刷新后重试"
+        ) from exc
+    except KnowledgeBaseArchived as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail="知识库已归档，不能修改文档标签"
+        ) from exc
+    except KnowledgeBaseNotFound as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="文档所属知识库不存在"
+        ) from exc
+    return DocumentProductLabelsResult(updated_ids=[document.id for document in documents])
 
 
 @router.get(

@@ -30,3 +30,6 @@ data/*.db-*
 # IDE 配置与权限异常的旧临时目录
 .idea/
 tmp8wlapag9/
+
+# 登录页配图生成源文件：仅本地保留
+vibe_images/

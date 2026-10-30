@@ -142,6 +142,14 @@ def _mentioned_models(query: str, models: list[str]) -> list[str]:
     return [model for model in models if model.casefold() in normalized]
 
 
+def _needs_model_choice(payload: KnowledgeAnswerRequest, model_options: list[str]) -> bool:
+    """多型号命中时是否还要反问：调用方已选定作用域就不再追问，避免重复确认。"""
+    if len(model_options) <= 1:
+        return False
+    # 选定型号即已确认；只选定产品时资料仍跨多型号，需要继续问型号。
+    return not (payload.model_name or "").strip()
+
+
 def _needs_full_section(query: str) -> bool:
     """判断是否在询问一整段操作说明，而不是单个细节。"""
     phrases = (
@@ -336,7 +344,7 @@ async def ask_knowledge_base(
                 sources=[],
             )
         model_options = _candidate_models(results)
-        if len(model_options) > 1:
+        if _needs_model_choice(payload, model_options):
             mentioned_models = _mentioned_models(payload.query, model_options)
             if mentioned_models:
                 results = [result for result in results if result.model_name in mentioned_models]
@@ -752,7 +760,7 @@ async def _stream_qa_events(
             yield done_event(answer, [])
             return
         model_options = _candidate_models(results)
-        if len(model_options) > 1:
+        if _needs_model_choice(payload, model_options):
             mentioned_models = _mentioned_models(payload.query, model_options)
             if mentioned_models:
                 results = [result for result in results if result.model_name in mentioned_models]

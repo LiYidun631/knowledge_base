@@ -160,7 +160,10 @@ class KnowledgeAnswerResponse(BaseModel):
     session_id: UUID | None = Field(description="问答会话 ID；未传会话时为空。")
     query: str = Field(description="规范化后的原始问题。")
     answer: str = Field(description="聊天模型根据知识库资料整理后的答案。")
-    clarification_required: bool = Field(default=False, description="是否需要用户先补充产品型号。")
+    clarification_required: bool = Field(
+        default=False,
+        description="是否需要用户先补充产品型号；请求已指定 model_name 时不会追问。",
+    )
     clarification_question: str | None = Field(
         default=None, description="需要用户补充信息时返回的追问。"
     )
@@ -858,6 +861,18 @@ class AdminCredentialCreate(BaseModel):
     role: AdminRole = Field(
         default="admin", description="角色：admin 全权、operator 运营、viewer 只读。"
     )
+    username: str | None = Field(
+        default=None,
+        min_length=3,
+        max_length=60,
+        description="登录账号（可选）；设置后可用账号密码登录，统一按小写保存。",
+    )
+    password: str | None = Field(
+        default=None,
+        min_length=8,
+        max_length=128,
+        description="登录密码（可选）；仅保存 PBKDF2 哈希，不回显。",
+    )
 
     @field_validator("name")
     @classmethod
@@ -867,6 +882,16 @@ class AdminCredentialCreate(BaseModel):
             raise ValueError("管理员标识不能为空")
         return stripped
 
+    @field_validator("username")
+    @classmethod
+    def strip_username(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        stripped = value.strip()
+        if not stripped or any(char.isspace() for char in stripped):
+            raise ValueError("登录账号不能为空或包含空格")
+        return stripped
+
 
 class AdminCredentialPatch(BaseModel):
     """修改管理员凭据；只提交要修改的字段。"""
@@ -874,9 +899,31 @@ class AdminCredentialPatch(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     is_enabled: bool | None = Field(
-        default=None, description="是否启用；停用后该 Token 对新请求立即失效。"
+        default=None, description="是否启用；停用后该 Token 与新会话立即失效。"
     )
     role: AdminRole | None = Field(default=None, description="调整凭据角色。")
+    username: str | None = Field(
+        default=None,
+        max_length=60,
+        description="调整或开通登录账号；传空字符串表示取消账号密码登录。",
+    )
+    password: str | None = Field(
+        default=None,
+        min_length=8,
+        max_length=128,
+        description="重设登录密码；改密后该凭据的全部已登录会话立即失效。",
+    )
+
+    @field_validator("username")
+    @classmethod
+    def strip_username(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        stripped = value.strip()
+        # 空串是「收回账号密码登录」的显式指令，只有非空账号才校验长度与空格。
+        if stripped and (len(stripped) < 3 or any(char.isspace() for char in stripped)):
+            raise ValueError("登录账号至少 3 个字符且不能包含空格")
+        return stripped
 
 
 class AdminCredentialRead(BaseModel):
@@ -888,8 +935,29 @@ class AdminCredentialRead(BaseModel):
     name: str = Field(description="管理员标识。")
     role: AdminRole = Field(description="角色：admin 全权、operator 运营、viewer 只读。")
     is_enabled: bool = Field(description="是否启用。")
+    username: str | None = Field(default=None, description="登录账号；未开通时为 None。")
+    has_password: bool = Field(description="是否已设置登录密码。")
     created_at: datetime = Field(description="创建时间。")
     updated_at: datetime = Field(description="最后更新时间。")
+
+
+class AdminLoginRequest(BaseModel):
+    """账号密码登录请求。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    username: str = Field(min_length=3, max_length=60, description="登录账号。")
+    password: str = Field(min_length=1, max_length=128, description="登录密码。", repr=False)
+
+
+class AdminLoginResponse(BaseModel):
+    """登录成功换发的短期会话凭据。"""
+
+    token: str = Field(description="会话 Token，按 Bearer 使用，有效期 7 天。", repr=False)
+    token_type: Literal["Bearer"] = "Bearer"
+    expires_at: datetime = Field(description="会话过期时间（UTC）。")
+    name: str = Field(description="管理员标识。")
+    admin_role: AdminRole = Field(description="该账号的角色。")
 
 
 class AdminMeRead(BaseModel):
@@ -1330,6 +1398,39 @@ class DocumentUpdate(BaseModel):
     folder_id: UUID | None = Field(
         description="目标目录 ID，必须属于文档所在子库；显式传 null 移动到根目录。"
     )
+
+
+class DocumentProductLabelsPatch(BaseModel):
+    """覆盖文档的产品名称与型号标签；空列表表示清空，按通用资料参与检索。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    product_names: list[str] = Field(
+        default_factory=list, max_length=20, description="替换后的产品名称，需在全局目录中登记。"
+    )
+    model_names: list[str] = Field(
+        default_factory=list, max_length=20, description="替换后的产品型号，需在全局目录中登记。"
+    )
+
+    @field_validator("product_names", "model_names")
+    @classmethod
+    def strip_labels(cls, values: list[str]) -> list[str]:
+        """去首尾空白并去重，保持提交顺序。"""
+        return list(dict.fromkeys(value.strip() for value in values if value.strip()))
+
+
+class DocumentProductLabelsBatchPatch(DocumentProductLabelsPatch):
+    """批量覆盖多个文档的产品名称与型号标签。"""
+
+    document_ids: list[UUID] = Field(
+        min_length=1, max_length=200, description="要修改标签的文档 ID 列表。"
+    )
+
+
+class DocumentProductLabelsResult(BaseModel):
+    """批量修改标签的结果。"""
+
+    updated_ids: list[UUID] = Field(description="已更新标签的文档 ID 列表。")
 
 
 class BatchFileVectorDeleteRequest(BaseModel):

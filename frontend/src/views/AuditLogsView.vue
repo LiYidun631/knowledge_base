@@ -3,6 +3,11 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Download, Refresh } from '@element-plus/icons-vue'
 import { client, errorMessage, errorText } from '../api/client'
+import PageHeader from '../components/ui/PageHeader.vue'
+import DataPanel from '../components/ui/DataPanel.vue'
+import FilterBar from '../components/ui/FilterBar.vue'
+import StatusPill from '../components/ui/StatusPill.vue'
+import EmptyState from '../components/ui/EmptyState.vue'
 
 interface AuditLogItem {
   id: string
@@ -142,52 +147,58 @@ onMounted(() => load())
 
 <template>
   <div class="audit-page">
-    <div class="page-head">
-      <div>
-        <div class="page-title">审计日志</div>
-        <div class="page-desc">
-          只记录管理端写操作（POST / PUT / PATCH / DELETE）· 时间均为 UTC · 保留 180 天
-        </div>
-      </div>
-      <div class="head-controls">
-        <el-button :icon="Refresh" circle aria-label="刷新审计日志" @click="load()" />
-        <el-button type="primary" :icon="Download" :loading="exporting" @click="exportCsv">
+    <PageHeader
+      title="审计日志"
+      eyebrow="操作留痕"
+      subtitle="只记录管理端写操作（POST / PUT / PATCH / DELETE）· 时间均为 UTC · 保留 180 天"
+    >
+      <template #meta>
+        <span class="header-count">共 {{ total.toLocaleString('zh-CN') }} 条</span>
+      </template>
+      <template #actions>
+        <el-button type="primary" size="small" :icon="Download" :loading="exporting" @click="exportCsv">
           导出 CSV
         </el-button>
-      </div>
-    </div>
+        <button class="refresh-btn" type="button" title="刷新" @click="load()">
+          <el-icon :class="{ spinning: loading }"><Refresh /></el-icon>
+        </button>
+      </template>
+    </PageHeader>
 
-    <el-card class="board" shadow="never">
-      <div class="controls-row">
-        <el-input
-          v-model="filters.actorName"
-          clearable
-          placeholder="操作者"
-          class="actor-input"
-          @keyup.enter="search"
-        />
-        <el-select v-model="filters.method" clearable placeholder="全部方法" class="method-select">
-          <el-option v-for="method in AUDITED_METHODS" :key="method" :label="method" :value="method" />
-        </el-select>
-        <el-input
-          v-model="filters.path"
-          clearable
-          placeholder="路径包含，如 /documents"
-          class="path-input"
-          @keyup.enter="search"
-        />
-        <el-date-picker
-          v-model="filters.dateRange"
-          type="daterange"
-          value-format="YYYY-MM-DD"
-          range-separator="至"
-          start-placeholder="开始日期"
-          end-placeholder="结束日期"
-          class="date-range"
-        />
-        <el-button type="primary" @click="search">查询</el-button>
-        <el-button :disabled="!hasFilters" @click="resetFilters">重置</el-button>
-        <span class="row-hint">共 {{ total }} 条</span>
+    <DataPanel flush>
+      <div class="panel-toolbar">
+        <FilterBar>
+          <el-input
+            v-model="filters.actorName"
+            clearable
+            placeholder="操作者"
+            class="actor-input"
+            @keyup.enter="search"
+          />
+          <el-select v-model="filters.method" clearable placeholder="全部方法" class="method-select">
+            <el-option v-for="method in AUDITED_METHODS" :key="method" :label="method" :value="method" />
+          </el-select>
+          <el-input
+            v-model="filters.path"
+            clearable
+            placeholder="路径包含，如 /documents"
+            class="path-input"
+            @keyup.enter="search"
+          />
+          <el-date-picker
+            v-model="filters.dateRange"
+            type="daterange"
+            value-format="YYYY-MM-DD"
+            range-separator="至"
+            start-placeholder="开始日期"
+            end-placeholder="结束日期"
+            class="date-range"
+          />
+          <template #actions>
+            <el-button type="primary" size="small" @click="search">查询</el-button>
+            <el-button size="small" :disabled="!hasFilters" @click="resetFilters">重置</el-button>
+          </template>
+        </FilterBar>
       </div>
 
       <el-alert
@@ -199,7 +210,18 @@ onMounted(() => load())
         :title="loadError"
       />
 
-      <el-table :data="rows" v-loading="loading" empty-text="还没有写操作记录" class="audit-table" row-key="id">
+      <el-table :data="rows" v-loading="loading" class="audit-table" row-key="id">
+        <template #empty>
+          <EmptyState
+            :title="hasFilters ? '没有匹配的审计记录' : '还没有写操作记录'"
+            :text="
+              hasFilters
+                ? '换个操作者、路径或时间范围再试试。'
+                : '管理员在管理端执行写操作后，这里会留下留痕。'
+            "
+            :muted="hasFilters"
+          />
+        </template>
         <el-table-column label="时间(UTC)" width="168">
           <template #default="{ row }">
             <span class="mono">{{ formatDateTime(row.created_at) }}</span>
@@ -225,9 +247,11 @@ onMounted(() => load())
         </el-table-column>
         <el-table-column label="状态" width="84">
           <template #default="{ row }">
-            <el-tag :type="row.status_code < 400 ? 'success' : 'danger'" size="small">
-              {{ row.status_code }}
-            </el-tag>
+            <StatusPill
+              :label="String(row.status_code)"
+              :tone="row.status_code < 400 ? 'success' : 'danger'"
+              :dot="false"
+            />
           </template>
         </el-table-column>
         <el-table-column label="耗时" width="88" align="right">
@@ -242,7 +266,7 @@ onMounted(() => load())
         </el-table-column>
       </el-table>
 
-      <div class="pager">
+      <template #footer>
         <el-pagination
           layout="prev, pager, next"
           :total="total"
@@ -250,8 +274,8 @@ onMounted(() => load())
           :current-page="page"
           @current-change="onPageChange"
         />
-      </div>
-    </el-card>
+      </template>
+    </DataPanel>
   </div>
 </template>
 
@@ -261,39 +285,41 @@ onMounted(() => load())
   /* 与统计概览/任务中心一致的极淡靛蓝氛围。 */
   background: radial-gradient(720px 260px at 86% -60px, rgba(79, 70, 229, 0.07), transparent 70%);
 }
-.page-head {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 16px;
-  margin-bottom: 20px;
-}
-.page-title {
-  font-size: 20px;
-  font-weight: 600;
-  letter-spacing: -0.2px;
-  color: var(--el-text-color-primary);
-}
-.page-desc {
-  margin-top: 4px;
-  font-size: 13px;
+.header-count {
+  font-size: var(--kb-font-xs);
   color: var(--el-text-color-secondary);
+  font-variant-numeric: tabular-nums;
 }
-.head-controls {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-shrink: 0;
+/* 与头部小号按钮同高，保持动作区一行对齐。 */
+.refresh-btn {
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 6px;
+  background: #fff;
+  color: var(--el-text-color-secondary);
+  cursor: pointer;
+  transition: color 0.2s var(--kb-ease), border-color 0.2s var(--kb-ease);
 }
-.board {
-  --el-card-border-color: var(--el-border-color);
+.refresh-btn:hover {
+  color: var(--el-color-primary);
+  border-color: var(--el-color-primary-light-7);
 }
-.controls-row {
-  display: flex;
-  flex-wrap: nowrap;
-  align-items: center;
-  gap: 10px;
-  margin-bottom: 14px;
+.refresh-btn .el-icon {
+  font-size: 13px;
+}
+.spinning {
+  animation: spin 0.9s linear infinite;
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.panel-toolbar {
+  padding: 14px 18px 0;
 }
 .actor-input {
   width: 150px;
@@ -305,16 +331,10 @@ onMounted(() => load())
   width: 220px;
 }
 .date-range {
-  width: 250px;
-}
-.row-hint {
-  margin-left: auto;
-  font-size: 12px;
-  color: var(--el-text-color-placeholder);
-  white-space: nowrap;
+  width: 268px;
 }
 .load-error {
-  margin-bottom: 12px;
+  margin: 0 18px 12px;
 }
 .actor-name {
   font-size: 13px;
@@ -324,7 +344,7 @@ onMounted(() => load())
   margin-left: 6px;
   padding: 1px 6px;
   border-radius: 4px;
-  font-size: 11px;
+  font-size: var(--kb-font-2xs);
   line-height: 1.6;
   background: #f2f3f5;
   color: #6b7280;
@@ -339,9 +359,9 @@ onMounted(() => load())
 }
 .method-chip {
   display: inline-flex;
-  padding: 2px 8px;
+  padding: 1px 8px;
   border-radius: 4px;
-  font-size: 11px;
+  font-size: var(--kb-font-2xs);
   font-weight: 600;
   letter-spacing: 0.3px;
   font-family: 'Cascadia Mono', Consolas, monospace;
@@ -371,11 +391,6 @@ onMounted(() => load())
   font-family: 'Cascadia Mono', Consolas, monospace;
   font-size: 12px;
 }
-.pager {
-  display: flex;
-  justify-content: flex-end;
-  margin-top: 14px;
-}
 .audit-table :deep(.el-table__row) {
   animation: row-in 0.24s var(--kb-ease) backwards;
 }
@@ -388,15 +403,6 @@ onMounted(() => load())
   to {
     opacity: 1;
     transform: translateX(0);
-  }
-}
-
-@media (max-width: 1280px) {
-  .controls-row {
-    flex-wrap: wrap;
-  }
-  .row-hint {
-    margin-left: 0;
   }
 }
 </style>

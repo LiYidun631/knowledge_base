@@ -3,6 +3,10 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { client, errorMessage } from '../api/client'
 import { canWrite, isFullAdmin } from '../api/session'
+import PageHeader from '../components/ui/PageHeader.vue'
+import DataPanel from '../components/ui/DataPanel.vue'
+import StatusPill from '../components/ui/StatusPill.vue'
+import EmptyState from '../components/ui/EmptyState.vue'
 
 interface Company {
   id: string
@@ -271,65 +275,82 @@ onMounted(loadCompanies)
 </script>
 
 <template>
-  <el-card>
-    <template #header>
-      <div class="head-row">
-        <span class="head-title"><el-icon><OfficeBuilding /></el-icon>公司管理</span>
-        <el-button v-if="canWrite" type="primary" :icon="'Plus'" @click="openCreateDialog">新建公司</el-button>
-      </div>
-    </template>
+  <div class="companies-page">
+    <PageHeader
+      title="公司管理"
+      eyebrow="租户与凭据"
+      subtitle="公司是知识库与访问凭据的归属单位 · 每枚凭据对应一个接入项目"
+    >
+      <template #meta>
+        <span class="header-count">共 {{ companies.length }} 家</span>
+      </template>
+      <template #actions>
+        <el-button v-if="canWrite" type="primary" size="small" @click="openCreateDialog">
+          <el-icon><Plus /></el-icon>新建公司
+        </el-button>
+      </template>
+    </PageHeader>
 
-    <el-table :data="companies" v-loading="loading" empty-text="暂无公司">
-      <el-table-column prop="name" label="公司名称" min-width="160" show-overflow-tooltip />
-      <el-table-column prop="code" label="编码" width="140" show-overflow-tooltip />
-      <el-table-column label="说明" min-width="180" show-overflow-tooltip>
-        <template #default="{ row }">{{ row.description || '—' }}</template>
-      </el-table-column>
-      <el-table-column label="状态" width="90">
-        <template #default="{ row }">
-          <el-tag v-if="row.status === 'active'" type="success" size="small">启用</el-tag>
-          <el-tag v-else type="info" size="small">{{ row.status }}</el-tag>
+    <DataPanel flush>
+      <el-table :data="companies" v-loading="loading">
+        <template #empty>
+          <EmptyState
+            title="还没有公司"
+            :text="canWrite ? '新建公司后即可创建知识库、签发接入凭据。' : '等待管理员创建公司。'"
+          />
         </template>
-      </el-table-column>
-      <el-table-column label="访问凭据" width="120">
-        <template #default="{ row }">
-          <span v-if="row.credential_count === 0" class="muted">未签发</span>
-          <el-tag
-            v-else
-            :type="row.active_credential_count > 0 ? 'success' : 'warning'"
-            size="small"
-          >
-            {{ row.active_credential_count }} / {{ row.credential_count }} 启用
-          </el-tag>
-        </template>
-      </el-table-column>
-      <el-table-column label="创建时间" width="110">
-        <template #default="{ row }">{{ formatDate(row.created_at) }}</template>
-      </el-table-column>
-      <el-table-column label="操作" width="340" fixed="right">
-        <template #default="{ row }">
-          <el-button
-            v-if="isFullAdmin"
-            size="small"
-            text
-            type="primary"
-            @click="openCredentialDialog(row)"
-          >
-            凭据管理
-          </el-button>
-          <el-button
-            v-if="canWrite && row.has_vector_library"
-            size="small"
-            text
-            type="warning"
-            @click="deleteVectorLibrary(row)"
-          >
-            删除大库
-          </el-button>
-          <el-button v-if="canWrite" size="small" text type="danger" @click="removeCompany(row)">删除</el-button>
-        </template>
-      </el-table-column>
-    </el-table>
+        <el-table-column prop="name" label="公司名称" min-width="160" show-overflow-tooltip />
+        <el-table-column prop="code" label="编码" width="140" show-overflow-tooltip />
+        <el-table-column label="说明" min-width="180" show-overflow-tooltip>
+          <template #default="{ row }">{{ row.description || '—' }}</template>
+        </el-table-column>
+        <el-table-column label="状态" width="100">
+          <template #default="{ row }">
+            <StatusPill
+              :label="row.status === 'active' ? '启用' : row.status === 'archived' ? '已归档' : row.status"
+              :tone="row.status === 'active' ? 'success' : 'info'"
+            />
+          </template>
+        </el-table-column>
+        <el-table-column label="访问凭据" width="130">
+          <template #default="{ row }">
+            <span v-if="row.credential_count === 0" class="cell-muted">未签发</span>
+            <StatusPill
+              v-else
+              :label="`${row.active_credential_count} / ${row.credential_count} 启用`"
+              :tone="row.active_credential_count > 0 ? 'success' : 'warning'"
+              :dot="false"
+            />
+          </template>
+        </el-table-column>
+        <el-table-column label="创建时间" width="110">
+          <template #default="{ row }">{{ formatDate(row.created_at) }}</template>
+        </el-table-column>
+        <el-table-column label="操作" width="300" fixed="right">
+          <template #default="{ row }">
+            <el-button
+              v-if="isFullAdmin"
+              size="small"
+              text
+              type="primary"
+              @click="openCredentialDialog(row)"
+            >
+              凭据管理
+            </el-button>
+            <el-button
+              v-if="canWrite && row.has_vector_library"
+              size="small"
+              text
+              type="warning"
+              @click="deleteVectorLibrary(row)"
+            >
+              删除大库
+            </el-button>
+            <el-button v-if="canWrite" size="small" text type="danger" @click="removeCompany(row)">删除</el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+    </DataPanel>
 
     <el-dialog
       v-model="createDialog.visible"
@@ -391,9 +412,10 @@ onMounted(loadCompanies)
         <el-table-column prop="name" label="项目" min-width="180" show-overflow-tooltip />
         <el-table-column label="状态" width="90">
           <template #default="{ row }">
-            <el-tag :type="row.is_enabled ? 'success' : 'info'" size="small">
-              {{ row.is_enabled ? '启用中' : '已停用' }}
-            </el-tag>
+            <StatusPill
+              :label="row.is_enabled ? '启用中' : '已停用'"
+              :tone="row.is_enabled ? 'success' : 'info'"
+            />
           </template>
         </el-table-column>
         <el-table-column label="签发时间" width="110">
@@ -455,24 +477,18 @@ onMounted(loadCompanies)
         <el-button type="primary" @click="tokenDialog.visible = false">我已保存</el-button>
       </template>
     </el-dialog>
-  </el-card>
+  </div>
 </template>
 
 <style scoped>
-.head-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-.head-title {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  color: var(--el-color-primary);
-}
-.muted {
+.header-count {
+  font-size: var(--kb-font-xs);
   color: var(--el-text-color-secondary);
-  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.cell-muted {
+  color: var(--el-text-color-placeholder);
+  font-size: var(--kb-font-xs);
 }
 .credential-alert {
   margin-bottom: 12px;
@@ -485,7 +501,7 @@ onMounted(loadCompanies)
 .credential-hint {
   margin: 12px 0 0;
   color: var(--el-text-color-secondary);
-  font-size: 12px;
+  font-size: var(--kb-font-xs);
   line-height: 1.6;
 }
 .token-alert {
@@ -503,7 +519,7 @@ onMounted(loadCompanies)
 .token-text {
   flex: 1;
   word-break: break-all;
-  font-size: 13px;
+  font-size: var(--kb-font-sm);
   font-family: 'Cascadia Code', Consolas, 'Courier New', monospace;
   color: var(--el-color-primary-dark-2);
 }

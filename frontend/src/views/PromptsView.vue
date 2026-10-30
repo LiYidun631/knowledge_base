@@ -2,6 +2,10 @@
 import { computed, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { client, errorMessage } from '../api/client'
+import PageHeader from '../components/ui/PageHeader.vue'
+import DataPanel from '../components/ui/DataPanel.vue'
+import StatusPill from '../components/ui/StatusPill.vue'
+import EmptyState from '../components/ui/EmptyState.vue'
 
 interface AdminPrompt {
   name: string
@@ -114,113 +118,161 @@ onMounted(load)
 </script>
 
 <template>
-  <el-card v-loading="loading">
-    <template #header>
-      <div class="head-row">
-        <span class="head-title"><el-icon><EditPen /></el-icon>提示词管理</span>
-        <span class="head-hint">保存后即时对在线问答与 FAQ 生成生效，重启服务不丢失</span>
-      </div>
-    </template>
+  <div class="prompts-page">
+    <PageHeader
+      title="提示词管理"
+      eyebrow="生成口径"
+      subtitle="保存后即时对在线问答与 FAQ 生成生效 · 覆写存在库内，重启服务不丢失"
+    >
+      <template #meta>
+        <span class="header-count">共 {{ prompts.length }} 个</span>
+        <span v-if="dirty" class="meta-dirty">未保存</span>
+      </template>
+      <template #actions>
+        <el-button size="small" :loading="loading" @click="load">
+          <el-icon><Refresh /></el-icon>刷新
+        </el-button>
+      </template>
+    </PageHeader>
+
     <div class="prompt-layout">
-      <aside class="prompt-list">
-        <div
-          v-for="item in prompts"
-          :key="item.name"
-          class="prompt-item"
-          :class="{ active: item.name === currentName }"
-          @click="select(item.name)"
-        >
-          <div class="prompt-item-title">{{ item.label }}</div>
-          <el-tag :type="sourceMeta[item.source]?.type ?? 'info'" size="small" effect="plain">
-            {{ sourceMeta[item.source]?.label ?? item.source }}
-          </el-tag>
-        </div>
-      </aside>
-      <div v-if="current" class="prompt-editor">
-        <div class="editor-head">
-          <div class="editor-title">
-            {{ current.label }}
-            <el-tag :type="sourceMeta[current.source]?.type ?? 'info'" size="small" effect="plain" class="editor-tag">
-              {{ sourceMeta[current.source]?.label ?? current.source }}
-            </el-tag>
+      <DataPanel
+        class="list-panel"
+        title="提示词"
+        :count="prompts.length ? `${prompts.length} 个` : null"
+        v-loading="loading"
+      >
+        <div class="prompt-items">
+          <div
+            v-for="item in prompts"
+            :key="item.name"
+            class="prompt-item"
+            :class="{ active: item.name === currentName }"
+            @click="select(item.name)"
+          >
+            <div class="prompt-item-title">{{ item.label }}</div>
+            <StatusPill
+              :label="sourceMeta[item.source]?.label ?? item.source"
+              :tone="sourceMeta[item.source]?.type ?? 'info'"
+            />
           </div>
-          <div v-if="dirty" class="dirty-mark">有未保存修改</div>
+          <EmptyState
+            v-if="!loading && prompts.length === 0"
+            title="没有可编辑的提示词"
+            text="接口未返回提示词，刷新后仍为空请检查服务日志。"
+          />
         </div>
-        <el-alert
-          v-if="current.name === 'knowledge_answer_system'"
-          type="info"
-          :closable="false"
-          show-icon
-          class="editor-hint"
-          title="提示词中的 {{brand_name}} 占位符会在生成时替换为 .env 配置的品牌名"
+      </DataPanel>
+
+      <DataPanel
+        class="editor-panel"
+        :title="current?.label"
+        v-loading="loading"
+      >
+        <template #actions v-if="current">
+          <StatusPill
+            :label="sourceMeta[current.source]?.label ?? current.source"
+            :tone="sourceMeta[current.source]?.type ?? 'info'"
+            :dot="false"
+          />
+        </template>
+
+        <template v-if="current">
+          <el-alert
+            v-if="current.name === 'knowledge_answer_system'"
+            type="info"
+            :closable="false"
+            show-icon
+            class="editor-hint"
+            title="提示词中的 {{brand_name}} 占位符会在生成时替换为 .env 配置的品牌名"
+          />
+          <el-input
+            v-model="draft"
+            type="textarea"
+            :rows="16"
+            maxlength="20000"
+            show-word-limit
+            class="editor-input"
+            @input="dirty = true"
+          />
+        </template>
+        <EmptyState
+          v-else-if="!loading"
+          title="暂无可编辑提示词"
+          text="选择左侧提示词即可查看与覆写正文。"
         />
-        <el-input
-          v-model="draft"
-          type="textarea"
-          :rows="16"
-          maxlength="20000"
-          show-word-limit
-          class="editor-input"
-          @input="dirty = true"
-        />
-        <div class="editor-foot">
-          <span class="foot-note">
-            来源：{{ sourceMeta[current.source]?.label ?? current.source }}
-            <template v-if="current.updated_at"> · 更新于 {{ current.updated_at.slice(0, 19).replace('T', ' ') }}</template>
-          </span>
-          <div class="foot-actions">
-            <el-button v-if="current.source === 'override'" plain type="warning" @click="resetToDefault">
-              回退默认
-            </el-button>
-            <el-button type="primary" :disabled="!dirty" :loading="saving" @click="save">
-              保存覆写
-            </el-button>
+
+        <template v-if="current" #footer>
+          <div class="editor-foot">
+            <span class="foot-note">
+              来源：{{ sourceMeta[current.source]?.label ?? current.source }}
+              <template v-if="current.updated_at">
+                · 更新于 {{ current.updated_at.slice(0, 19).replace('T', ' ') }}
+              </template>
+            </span>
+            <div class="foot-actions">
+              <el-button
+                v-if="current.source === 'override'"
+                size="small"
+                plain
+                type="warning"
+                @click="resetToDefault"
+              >
+                回退默认
+              </el-button>
+              <el-button size="small" type="primary" :disabled="!dirty" :loading="saving" @click="save">
+                保存覆写
+              </el-button>
+            </div>
           </div>
-        </div>
-      </div>
-      <el-empty v-else description="暂无可编辑提示词" />
+        </template>
+      </DataPanel>
     </div>
-  </el-card>
+  </div>
 </template>
 
 <style scoped>
-.head-row {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-}
-.head-title {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 16px;
-  font-weight: 600;
-  color: var(--el-text-color-primary);
-}
-.head-hint {
-  font-size: 12px;
+.header-count {
+  font-size: var(--kb-font-xs);
   color: var(--el-text-color-secondary);
+  font-variant-numeric: tabular-nums;
+}
+.meta-dirty {
+  font-size: var(--kb-font-xs);
+  color: var(--el-color-warning);
 }
 
 .prompt-layout {
   display: grid;
-  grid-template-columns: 220px 1fr;
-  gap: 20px;
-  min-height: 420px;
+  grid-template-columns: 230px minmax(0, 1fr);
+  gap: 16px;
+  min-width: 0;
 }
-.prompt-list {
+.list-panel,
+.editor-panel {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  min-width: 0;
+}
+.list-panel :deep(.panel-body) {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+}
+.prompt-items {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 8px;
 }
 .prompt-item {
-  padding: 12px 14px;
+  padding: 11px 13px;
   border: 1px solid var(--el-border-color);
-  border-radius: 6px;
+  border-radius: var(--el-border-radius-base);
   cursor: pointer;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 7px;
   transition: border-color 0.15s var(--kb-ease), box-shadow 0.15s var(--kb-ease);
 }
 .prompt-item:hover {
@@ -232,58 +284,48 @@ onMounted(load)
   background: var(--el-color-primary-light-9);
 }
 .prompt-item-title {
-  font-size: 14px;
+  font-size: var(--kb-font-sm);
   font-weight: 600;
   color: var(--el-text-color-primary);
 }
 
-.prompt-editor {
+.editor-panel :deep(.panel-body) {
   display: flex;
+  flex: 1 1 auto;
   flex-direction: column;
   gap: 12px;
 }
-.editor-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-.editor-title {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 15px;
-  font-weight: 600;
-  color: var(--el-text-color-primary);
-}
-.dirty-mark {
-  font-size: 12px;
-  color: var(--el-color-warning);
-}
 .editor-hint {
-  border-radius: 6px;
+  border-radius: var(--el-border-radius-small);
+}
+.editor-input {
+  width: 100%;
 }
 .editor-input :deep(.el-textarea__inner) {
   font-family: 'JetBrains Mono', 'Cascadia Code', Consolas, monospace;
-  font-size: 13px;
+  font-size: var(--kb-font-sm);
   line-height: 1.8;
 }
 .editor-foot {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 12px;
+  width: 100%;
 }
 .foot-note {
-  font-size: 12px;
+  font-size: var(--kb-font-xs);
   color: var(--el-text-color-secondary);
 }
 .foot-actions {
   display: flex;
-  gap: 10px;
+  gap: 8px;
+  flex: none;
 }
 
 @media (max-width: 900px) {
   .prompt-layout {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 </style>

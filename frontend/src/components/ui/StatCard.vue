@@ -29,6 +29,7 @@ withDefaults(
   display: flex;
   flex-direction: column;
   gap: 2px;
+  box-sizing: border-box;
   height: 96px;
   padding: 13px 16px;
   background: var(--kb-panel-bg);
@@ -72,7 +73,7 @@ withDefaults(
 
 .stat-value {
   margin: auto 0 0;
-  font-size: 22px;
+  font-size: 24px;
   font-weight: 600;
   line-height: 1.2;
   color: var(--el-text-color-primary);

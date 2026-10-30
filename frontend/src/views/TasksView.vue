@@ -5,6 +5,11 @@ import { ElMessage } from 'element-plus'
 import { Refresh } from '@element-plus/icons-vue'
 import { client, errorMessage, errorText } from '../api/client'
 import { canWrite } from '../api/session'
+import PageHeader from '../components/ui/PageHeader.vue'
+import DataPanel from '../components/ui/DataPanel.vue'
+import FilterBar from '../components/ui/FilterBar.vue'
+import StatusPill from '../components/ui/StatusPill.vue'
+import EmptyState from '../components/ui/EmptyState.vue'
 
 interface Company {
   id: string
@@ -80,12 +85,14 @@ const kindMeta: Record<TaskKind, { label: string; tone: string }> = {
   evaluation: { label: '评测', tone: 'evaluation' },
 }
 
-const statusMeta: Record<TaskStatus, { label: string; type: 'warning' | 'primary' | 'danger' | 'success' | 'info' }> = {
-  queued: { label: '排队中', type: 'warning' },
-  running: { label: '进行中', type: 'primary' },
-  failed: { label: '失败', type: 'danger' },
-  cancelled: { label: '已取消', type: 'info' },
-  success: { label: '已完成', type: 'success' },
+type PillTone = 'success' | 'warning' | 'danger' | 'info' | 'primary'
+
+const statusMeta: Record<TaskStatus, { label: string; tone: PillTone }> = {
+  queued: { label: '排队中', tone: 'warning' },
+  running: { label: '进行中', tone: 'primary' },
+  failed: { label: '失败', tone: 'danger' },
+  cancelled: { label: '已取消', tone: 'info' },
+  success: { label: '已完成', tone: 'success' },
 }
 
 // 状态瓷砖即筛选器，点击切换；数量始终来自后端 counts，不受当前状态过滤影响。
@@ -97,12 +104,23 @@ const tiles = computed(() => [
 ])
 
 const activeTasks = computed(() => counts.value.queued + counts.value.running)
+// 轮询只在有排队/进行中任务时开启，所以「空闲」和「已关闭」要说清楚，不能让开关看起来失灵。
+const liveLabel = computed(() => {
+  if (!autoRefresh.value) return '自动刷新已关闭'
+  return activeTasks.value > 0 ? '实时刷新中' : '空闲 · 有任务时自动刷新'
+})
 const emptyText = computed(() =>
   filters.status === 'open'
     ? '当前没有未完成的任务'
     : filters.status === 'done'
       ? '今天还没有完成的任务'
       : '没有符合筛选条件的任务',
+)
+// 默认视图（未完成）本身就是一种筛选，不算用户主动收窄。
+const filtersActive = computed(
+  () =>
+    Boolean(filters.kind || filters.companyId || filters.kbId) ||
+    filters.status !== 'open',
 )
 
 // 瓷砖直接改状态筛选，需显式重新拉取（下拉框另有 @change）。
@@ -243,25 +261,27 @@ onBeforeUnmount(() => window.clearInterval(timer))
 
 <template>
   <div class="tasks-page">
-    <div class="page-head">
-      <div>
-        <div class="page-title">任务中心</div>
-        <div class="page-desc">
-          入库、FAQ 生成与检索评测的统一视图
-          <span class="update-time">· 更新于 {{ updatedLabel(generatedAt) }}</span>
-        </div>
-      </div>
-      <div class="head-controls">
+    <PageHeader
+      title="任务中心"
+      eyebrow="运行队列"
+      subtitle="入库、FAQ 生成与检索评测的统一视图"
+    >
+      <template #meta>
+        <span class="header-count">更新于 {{ updatedLabel(generatedAt) }}</span>
+      </template>
+      <template #actions>
         <span class="live-hint" :class="{ live: autoRefresh && activeTasks > 0 }">
           <i class="live-dot" />
-          {{ autoRefresh && activeTasks > 0 ? '实时刷新中' : '已暂停刷新' }}
+          {{ liveLabel }}
         </span>
         <el-switch v-model="autoRefresh" size="small" />
-        <el-button :icon="Refresh" circle aria-label="刷新任务列表" @click="load()" />
-      </div>
-    </div>
+        <button class="refresh-btn" type="button" title="刷新" @click="load()">
+          <el-icon :class="{ spinning: loading }"><Refresh /></el-icon>
+        </button>
+      </template>
+    </PageHeader>
 
-    <section class="stat-tiles">
+    <section class="tile-grid">
       <button
         v-for="(tile, index) in tiles"
         :key="tile.key"
@@ -271,43 +291,47 @@ onBeforeUnmount(() => window.clearInterval(timer))
         :style="{ '--delay': `${index * 40}ms` }"
         @click="pickStatus(tile.key)"
       >
-        <span class="tile-value">{{ tile.value }}</span>
+        <span class="tile-mark" aria-hidden="true" />
         <span class="tile-label">{{ tile.label }}</span>
-        <span class="tile-spark" />
+        <span class="tile-value">{{ tile.value }}</span>
       </button>
     </section>
 
-    <el-card class="board" shadow="never">
-      <div class="controls-row">
-        <el-select v-model="filters.kind" clearable placeholder="全部类型" class="kind-select" @change="load()">
-          <el-option label="入库" value="ingest" />
-          <el-option label="FAQ 生成" value="faq" />
-          <el-option label="检索评测" value="evaluation" />
-        </el-select>
-        <el-select v-model="filters.status" class="status-select" @change="load()">
-          <el-option label="未完成" value="open" />
-          <el-option label="排队中" value="queued" />
-          <el-option label="进行中" value="running" />
-          <el-option label="失败" value="failed" />
-          <el-option label="今日完成" value="done" />
-          <el-option label="全部" value="all" />
-        </el-select>
-        <el-select v-model="filters.companyId" clearable placeholder="全部公司" class="company-select">
-          <el-option v-for="company in companies" :key="company.id" :label="company.name" :value="company.id" />
-        </el-select>
-        <el-select
-          v-model="filters.kbId"
-          clearable
-          placeholder="全部知识库"
-          class="kb-select"
-          :disabled="!filters.companyId"
-          @change="load()"
-        >
-          <el-option v-for="kb in kbs" :key="kb.id" :label="kb.name" :value="kb.id" />
-        </el-select>
-        <span class="row-hint">
-          共 {{ rows.length }} 条{{ truncated ? '（已截断，请缩小筛选范围）' : '' }}
-        </span>
+    <DataPanel flush>
+      <div class="panel-toolbar">
+        <FilterBar>
+          <el-select v-model="filters.kind" clearable placeholder="全部类型" class="kind-select" @change="load()">
+            <el-option label="入库" value="ingest" />
+            <el-option label="FAQ 生成" value="faq" />
+            <el-option label="检索评测" value="evaluation" />
+          </el-select>
+          <el-select v-model="filters.status" class="status-select" @change="load()">
+            <el-option label="未完成" value="open" />
+            <el-option label="排队中" value="queued" />
+            <el-option label="进行中" value="running" />
+            <el-option label="失败" value="failed" />
+            <el-option label="今日完成" value="done" />
+            <el-option label="全部" value="all" />
+          </el-select>
+          <el-select v-model="filters.companyId" clearable placeholder="全部公司" class="company-select">
+            <el-option v-for="company in companies" :key="company.id" :label="company.name" :value="company.id" />
+          </el-select>
+          <el-select
+            v-model="filters.kbId"
+            clearable
+            placeholder="全部知识库"
+            class="kb-select"
+            :disabled="!filters.companyId"
+            @change="load()"
+          >
+            <el-option v-for="kb in kbs" :key="kb.id" :label="kb.name" :value="kb.id" />
+          </el-select>
+          <template #actions>
+            <span class="row-hint">
+              共 {{ rows.length }} 条{{ truncated ? '（已截断，请缩小筛选范围）' : '' }}
+            </span>
+          </template>
+        </FilterBar>
       </div>
 
       <el-alert
@@ -319,7 +343,18 @@ onBeforeUnmount(() => window.clearInterval(timer))
         :title="loadError"
       />
 
-      <el-table :data="rows" v-loading="loading" :empty-text="emptyText" class="task-table" row-key="task_id">
+      <el-table :data="rows" v-loading="loading" class="task-table" row-key="task_id">
+        <template #empty>
+          <EmptyState
+            :title="emptyText"
+            :text="
+              filtersActive
+                ? '调整筛选条件，或稍后回来重新查看。'
+                : '入库、FAQ 生成与评测任务提交后会实时出现在这里。'
+            "
+            :muted="filtersActive"
+          />
+        </template>
         <el-table-column label="类型" width="86">
           <template #default="{ row }">
             <span class="kind-chip" :class="`tone-${kindMeta[row.kind as TaskKind].tone}`">
@@ -329,10 +364,11 @@ onBeforeUnmount(() => window.clearInterval(timer))
         </el-table-column>
         <el-table-column label="状态" width="104">
           <template #default="{ row }">
-            <el-tag :type="statusMeta[row.status as TaskStatus].type" size="small" class="status-tag">
-              <i v-if="row.status === 'running'" class="pulse-dot" />
-              {{ statusMeta[row.status as TaskStatus].label }}
-            </el-tag>
+            <StatusPill
+              :label="statusMeta[row.status as TaskStatus].label"
+              :tone="statusMeta[row.status as TaskStatus].tone"
+              :pulse="row.status === 'running'"
+            />
           </template>
         </el-table-column>
         <el-table-column label="任务对象" min-width="260">
@@ -398,7 +434,7 @@ onBeforeUnmount(() => window.clearInterval(timer))
           </template>
         </el-table-column>
       </el-table>
-    </el-card>
+    </DataPanel>
   </div>
 </template>
 
@@ -408,39 +444,19 @@ onBeforeUnmount(() => window.clearInterval(timer))
   /* 与统计概览一致的极淡靛蓝氛围。 */
   background: radial-gradient(720px 260px at 86% -60px, rgba(79, 70, 229, 0.07), transparent 70%);
 }
-.page-head {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 16px;
-  margin-bottom: 20px;
-}
-.page-title {
-  font-size: 20px;
-  font-weight: 600;
-  letter-spacing: -0.2px;
-  color: var(--el-text-color-primary);
-}
-.page-desc {
-  margin-top: 4px;
-  font-size: 13px;
+.header-count {
+  font-size: var(--kb-font-xs);
   color: var(--el-text-color-secondary);
-}
-.update-time {
-  color: var(--el-text-color-placeholder);
-}
-.head-controls {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
 }
 .live-hint {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  font-size: 12px;
+  height: 24px;
+  font-size: var(--kb-font-2xs);
   color: var(--el-text-color-placeholder);
+  white-space: nowrap;
 }
 .live-dot {
   width: 6px;
@@ -455,9 +471,32 @@ onBeforeUnmount(() => window.clearInterval(timer))
   background: var(--el-color-primary);
   animation: live-breathe 1.8s var(--kb-ease) infinite;
 }
+/* 与头部小号按钮同高，保持动作区一行对齐。 */
+.refresh-btn {
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 6px;
+  background: #fff;
+  color: var(--el-text-color-secondary);
+  cursor: pointer;
+  transition: color 0.2s var(--kb-ease), border-color 0.2s var(--kb-ease);
+}
+.refresh-btn:hover {
+  color: var(--el-color-primary);
+  border-color: var(--el-color-primary-light-7);
+}
+.refresh-btn .el-icon {
+  font-size: 13px;
+}
+.spinning {
+  animation: spin 0.9s linear infinite;
+}
 
-/* —— 状态瓷砖：点击即筛选 —— */
-.stat-tiles {
+/* —— 状态瓷砖：点击即筛选，尺寸与指标卡一致 —— */
+.tile-grid {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
   gap: 16px;
@@ -467,13 +506,14 @@ onBeforeUnmount(() => window.clearInterval(timer))
   position: relative;
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  padding: 16px 18px;
+  gap: 2px;
+  height: 96px;
+  padding: 13px 16px;
   text-align: left;
-  background: #fff;
-  border: 1px solid var(--el-border-color);
-  border-radius: var(--el-border-radius-base);
-  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+  background: var(--kb-panel-bg);
+  border: 1px solid var(--kb-panel-border);
+  border-radius: var(--kb-panel-radius);
+  box-shadow: var(--kb-panel-shadow);
   cursor: pointer;
   overflow: hidden;
   animation: tile-rise 0.3s var(--kb-ease) backwards;
@@ -486,35 +526,37 @@ onBeforeUnmount(() => window.clearInterval(timer))
   box-shadow: 0 6px 16px rgba(15, 23, 42, 0.07);
 }
 .stat-tile:active {
-  transform: scale(0.99);
+  transform: scale(0.995);
 }
 .stat-tile.active {
   border-color: var(--tile-accent);
   box-shadow: inset 0 0 0 1px var(--tile-accent);
 }
+.tile-mark {
+  position: absolute;
+  top: 14px;
+  left: 16px;
+  width: 6px;
+  height: 6px;
+  border-radius: 2px;
+  background: var(--tile-accent);
+}
+.tile-label {
+  padding-left: 12px;
+  font-size: var(--kb-font-xs);
+  color: var(--el-text-color-secondary);
+}
 .tile-value {
-  font-family: 'Cascadia Mono', Consolas, monospace;
-  font-size: 26px;
+  margin: auto 0 0;
+  font-size: 24px;
   font-weight: 600;
-  line-height: 1.1;
+  line-height: 1.2;
   color: var(--el-text-color-primary);
+  font-variant-numeric: tabular-nums;
   transition: color 0.2s var(--kb-ease);
 }
 .stat-tile.active .tile-value {
   color: var(--tile-accent);
-}
-.tile-label {
-  font-size: 12px;
-  color: var(--el-text-color-secondary);
-}
-.tile-spark {
-  position: absolute;
-  right: 14px;
-  bottom: 14px;
-  width: 26px;
-  height: 26px;
-  border-radius: 8px;
-  background: var(--tile-wash);
 }
 .tone-queued {
   --tile-accent: #d97706;
@@ -532,57 +574,51 @@ onBeforeUnmount(() => window.clearInterval(timer))
   --tile-accent: #16a34a;
   --tile-wash: rgba(22, 163, 74, 0.09);
 }
+/* 任务类型胶囊（入库 / FAQ / 评测） */
+.tone-ingest {
+  --tile-accent: #4f46e5;
+  --tile-wash: rgba(79, 70, 229, 0.09);
+}
+.tone-faq {
+  --tile-accent: #0284c7;
+  --tile-wash: rgba(2, 132, 199, 0.09);
+}
+.tone-evaluation {
+  --tile-accent: #7c3aed;
+  --tile-wash: rgba(124, 58, 237, 0.09);
+}
 
-.board {
-  --el-card-border-color: var(--el-border-color);
+.panel-toolbar {
+  padding: 14px 18px 0;
 }
 .load-error {
-  margin-bottom: 12px;
-}
-.controls-row {
-  display: flex;
-  flex-wrap: nowrap;
-  align-items: center;
-  gap: 10px;
-  margin-bottom: 14px;
+  margin: 0 18px 12px;
 }
 .kind-select {
-  width: 130px;
+  width: 120px;
 }
 .status-select {
-  width: 130px;
+  width: 118px;
 }
 .company-select {
-  width: 170px;
+  width: 160px;
 }
 .kb-select {
-  width: 190px;
+  width: 180px;
 }
 .row-hint {
-  margin-left: auto;
-  font-size: 12px;
+  font-size: var(--kb-font-xs);
   color: var(--el-text-color-placeholder);
   white-space: nowrap;
 }
 .kind-chip {
   display: inline-flex;
-  padding: 2px 8px;
+  padding: 1px 8px;
   border-radius: 4px;
-  font-size: 12px;
+  font-size: var(--kb-font-2xs);
+  line-height: 18px;
   color: var(--tile-accent);
   background: var(--tile-wash);
-}
-.status-tag {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-}
-.pulse-dot {
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  background: currentColor;
-  animation: live-breathe 1.6s var(--kb-ease) infinite;
 }
 .task-title {
   font-size: 13px;
@@ -658,17 +694,14 @@ onBeforeUnmount(() => window.clearInterval(timer))
     box-shadow: 0 0 0 3px rgba(79, 70, 229, 0);
   }
 }
-
-@media (max-width: 1200px) {
-  .controls-row {
-    flex-wrap: wrap;
-  }
-  .row-hint {
-    margin-left: 0;
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
   }
 }
+
 @media (max-width: 900px) {
-  .stat-tiles {
+  .tile-grid {
     grid-template-columns: repeat(2, 1fr);
   }
 }

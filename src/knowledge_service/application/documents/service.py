@@ -5,12 +5,18 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from knowledge_service.application.knowledge_bases.service import get_knowledge_base
+from knowledge_service.domain.errors import (
+    DocumentNotFound,
+    KnowledgeBaseArchived,
+    KnowledgeBaseNotFound,
+)
 from knowledge_service.domain.policies import lock_model_binding
 from knowledge_service.infrastructure.persistence.models import (
     Document,
     DocumentFolder,
     DocumentVersion,
     IngestionJob,
+    KnowledgeBase,
     OutboxEvent,
 )
 
@@ -138,3 +144,53 @@ async def register_document(
     )
     await session.flush()
     return document
+
+
+async def update_product_labels(
+    session: AsyncSession,
+    *,
+    document_ids: list[UUID],
+    product_names: list[str],
+    model_names: list[str],
+) -> list[Document]:
+    """覆盖文档的产品名称与型号标签；空列表表示清空，按通用资料参与检索。
+
+    标签只存在 documents.extra_metadata，检索过滤、型号澄清与 FAQ 匹配都在
+    查询期实时读取，因此改标签不需要重新解析或重建向量。
+    """
+    documents = list(
+        (
+            await session.scalars(
+                select(Document).where(Document.id.in_(document_ids)).with_for_update()
+            )
+        ).all()
+    )
+    found_ids = {document.id for document in documents}
+    if any(document_id not in found_ids for document_id in document_ids):
+        raise DocumentNotFound
+
+    knowledge_base_ids = {document.knowledge_base_id for document in documents}
+    status_rows = (
+        await session.execute(
+            select(KnowledgeBase.id, KnowledgeBase.status).where(
+                KnowledgeBase.id.in_(knowledge_base_ids)
+            )
+        )
+    ).all()
+    statuses = {knowledge_base_id: status for knowledge_base_id, status in status_rows}
+    if len(statuses) != len(knowledge_base_ids):
+        raise KnowledgeBaseNotFound
+    # 归档库整体只读，标签同样不能改。
+    if any(status != "active" for status in statuses.values()):
+        raise KnowledgeBaseArchived
+
+    for document in documents:
+        metadata = dict(document.extra_metadata or {})
+        # 读取时列表与旧版单值键会被合并，不删掉旧键等于旧标签仍然生效。
+        metadata.pop("product_name", None)
+        metadata.pop("model_name", None)
+        metadata["product_names"] = list(product_names)
+        metadata["model_names"] = list(model_names)
+        document.extra_metadata = metadata
+    await session.flush()
+    return documents

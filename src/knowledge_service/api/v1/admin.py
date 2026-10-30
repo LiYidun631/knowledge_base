@@ -74,7 +74,7 @@ from knowledge_service.api.v1.schemas import (
     QARecordReviewPatch,
     QASourceRead,
 )
-from knowledge_service.application import admin_credentials
+from knowledge_service.application import admin_auth, admin_credentials
 from knowledge_service.application import model_profiles as service
 from knowledge_service.application.documents.rendering import render_images
 from knowledge_service.core.config import Settings, get_settings
@@ -104,6 +104,7 @@ from knowledge_service.infrastructure.model_providers.rerank import (
 )
 from knowledge_service.infrastructure.ocr_client import OcrServiceError, analyze_image
 from knowledge_service.infrastructure.persistence.models import (
+    AdminCredential,
     AdminPromptOverride,
     AppProject,
     AuditLog,
@@ -654,13 +655,29 @@ async def get_admin_me(
     )
 
 
+def _read_admin_credential(credential: AdminCredential) -> AdminCredentialRead:
+    """凭据转响应；has_password 是派生字段，ORM 上没有对应列。"""
+    return AdminCredentialRead.model_validate(
+        {
+            "id": credential.id,
+            "name": credential.name,
+            "role": credential.role,
+            "is_enabled": credential.is_enabled,
+            "username": credential.username,
+            "has_password": bool(credential.password_hash),
+            "created_at": credential.created_at,
+            "updated_at": credential.updated_at,
+        }
+    )
+
+
 @router.get("/credentials", response_model=list[AdminCredentialRead], summary="管理员凭据列表")
 async def list_admin_credentials(
     session: Annotated[AsyncSession, Depends(get_db_session, scope="function")],
 ) -> list[AdminCredentialRead]:
     """列出库内管理员凭据；不返回哈希或明文，.env 引导 Token 不在此列。"""
     return [
-        AdminCredentialRead.model_validate(item)
+        _read_admin_credential(item)
         for item in await admin_credentials.list_admin_credentials(session)
     ]
 
@@ -670,18 +687,33 @@ async def list_admin_credentials(
     response_model=AdminCredentialIssued,
     status_code=status.HTTP_201_CREATED,
     summary="创建管理员凭据",
-    description="明文 Token 仅本次返回；只保存哈希。",
+    description="明文 Token 仅本次返回；只保存哈希。可同时开通账号密码登录。",
 )
 async def create_admin_credential(
     payload: AdminCredentialCreate,
     response: Response,
     session: Annotated[AsyncSession, Depends(get_db_session, scope="function")],
 ) -> AdminCredentialIssued:
-    credential, token = await admin_credentials.create_admin_credential(
-        session, name=payload.name, role=payload.role
-    )
-    # 明文仅返回一次，必须先提交成功，不能依赖响应发送后的会话清理提交。
-    await session.commit()
+    if payload.username and not payload.password:
+        raise HTTPException(status_code=400, detail="开通账号密码登录需同时设置密码")
+    try:
+        if payload.username:
+            await admin_auth.ensure_username_available(session, username=payload.username)
+        credential, token = await admin_credentials.create_admin_credential(
+            session,
+            name=payload.name,
+            role=payload.role,
+            username=payload.username,
+            password=payload.password,
+        )
+        # 明文仅返回一次，必须先提交成功，不能依赖响应发送后的会话清理提交。
+        await session.commit()
+    except admin_auth.LoginAccountTaken as exc:
+        raise HTTPException(status_code=409, detail="登录账号已被占用") from exc
+    except IntegrityError as exc:
+        # 唯一索引兜底：并发创建同一账号时不让原始数据库错误外泄。
+        await session.rollback()
+        raise HTTPException(status_code=409, detail="登录账号已被占用") from exc
     response.headers["Cache-Control"] = "no-store"
     response.headers["Pragma"] = "no-cache"
     return AdminCredentialIssued(admin_credential_id=credential.id, token=token)
@@ -726,7 +758,7 @@ async def _ensure_admin_remains(
 @router.patch(
     "/credentials/{admin_credential_id}",
     response_model=AdminCredentialRead,
-    summary="修改管理员凭据（启停与角色）",
+    summary="修改管理员凭据（启停、角色与账号密码）",
 )
 async def patch_admin_credential(
     admin_credential_id: UUID,
@@ -748,15 +780,29 @@ async def patch_admin_credential(
             and (next_role != "admin" or not next_enabled)
         ):
             await _ensure_admin_remains(session, settings, admin_credential_id=admin_credential_id)
+        if payload.username:
+            # 开通或改名都要确认账号未被占用；密码可以后补，但没密码时账号登录不了。
+            await admin_auth.ensure_username_available(
+                session, username=payload.username, exclude_id=admin_credential_id
+            )
         credential = await admin_credentials.update_admin_credential(
             session,
             admin_credential_id=admin_credential_id,
             role=payload.role,
             is_enabled=payload.is_enabled,
+            username=payload.username,
+            password=payload.password,
         )
+        await session.commit()
+    except admin_auth.LoginAccountTaken as exc:
+        await session.rollback()
+        raise HTTPException(status_code=409, detail="登录账号已被占用") from exc
+    except IntegrityError as exc:
+        await session.rollback()
+        raise HTTPException(status_code=409, detail="登录账号已被占用") from exc
     except AdminCredentialNotFound as exc:
         raise HTTPException(status_code=404, detail="管理员凭据不存在") from exc
-    return AdminCredentialRead.model_validate(credential)
+    return _read_admin_credential(credential)
 
 
 @router.delete(

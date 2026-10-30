@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { clearToken, getToken, onAuthFailure } from './api/client'
+import { clearToken, client, getToken, onAuthFailure } from './api/client'
 import {
   ROLE_LABELS,
   adminIdentity,
@@ -151,7 +151,13 @@ onBeforeUnmount(() => {
   window.removeEventListener('resize', syncViewport)
 })
 
-function logout() {
+async function logout() {
+  // 先撤销服务端会话，失败也要清掉本地凭据，不能把人困在已登录状态。
+  try {
+    await client.post('/admin/logout')
+  } catch {
+    /* 长期 Token 没有会话可撤销，忽略 */
+  }
   clearToken()
   setIdentity(null)
   authorized.value = false

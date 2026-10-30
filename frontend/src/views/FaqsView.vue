@@ -3,6 +3,7 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { client, errorMessage } from '../api/client'
 import FaqPanel from '../components/FaqPanel.vue'
+import PageHeader from '../components/ui/PageHeader.vue'
 
 interface Company {
   id: string
@@ -94,15 +95,12 @@ onMounted(async () => {
 </script>
 
 <template>
-  <el-card>
-    <template #header>
-      <div class="head-row">
-        <span class="head-title"><el-icon><ChatLineSquare /></el-icon>FAQ 管理</span>
-        <span class="head-hint">
-          库级 FAQ 对全库生效；文档级 FAQ 只在对应文档范围内可命中，命中后原样直出
-        </span>
-      </div>
-    </template>
+  <div class="faqs-page">
+    <PageHeader
+      title="FAQ 管理"
+      eyebrow="直出问答"
+      subtitle="库级 FAQ 对全库生效 · 文档级只在对应文档范围内命中，命中后原样直出"
+    />
 
     <FaqPanel :key="kbId || 'empty'" :kb-id="kbId" :initial-query="faqQuery">
       <template #toolbar>
@@ -132,37 +130,20 @@ onMounted(async () => {
         <span class="picker-divider" aria-hidden="true" />
       </template>
     </FaqPanel>
-  </el-card>
+  </div>
 </template>
 
 <style scoped>
-.head-row {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: 8px;
+.picker-company {
+  width: 150px;
 }
-.head-title {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 16px;
-  font-weight: 600;
-  color: var(--el-text-color-primary);
-}
-.head-hint {
-  font-size: 12px;
-  color: var(--el-text-color-secondary);
-}
-.picker-company,
 .picker-kb {
-  width: 180px;
+  width: 170px;
 }
 .picker-divider {
   flex: none;
   width: 1px;
-  height: 20px;
+  height: 18px;
   background: var(--el-border-color);
 }
 </style>

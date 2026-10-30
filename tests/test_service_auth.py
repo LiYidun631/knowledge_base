@@ -89,7 +89,8 @@ def test_openapi_requires_bearer_for_all_business_routes(monkeypatch):
     }
     for path, methods in schema["paths"].items():
         for operation in methods.values():
-            if path.endswith("/health"):
+            # 健康检查与登录入口是仅有的匿名接口；登出仍需要 Bearer 才能定位会话。
+            if path.endswith("/health") or path.endswith("/admin/login"):
                 assert not operation.get("security")
             else:
                 assert operation["security"] == [{"KnowledgeServiceBearer": []}]

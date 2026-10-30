@@ -3,6 +3,11 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { Refresh } from '@element-plus/icons-vue'
 import { client, errorMessage } from '../api/client'
+import PageHeader from '../components/ui/PageHeader.vue'
+import DataPanel from '../components/ui/DataPanel.vue'
+import StatCard from '../components/ui/StatCard.vue'
+import StatusPill from '../components/ui/StatusPill.vue'
+import EmptyState from '../components/ui/EmptyState.vue'
 
 interface DailyTrendPoint {
   date: string
@@ -230,10 +235,10 @@ const qaStatusRows = computed(() => {
   const byStatus = stats.value?.qa_by_status ?? {}
   const total = stats.value?.qa_total ?? 0
   const meta: Record<string, { label: string; color: string }> = {
-    success: { label: '成功', color: '#16a34a' },
-    no_results: { label: '未命中', color: '#d97706' },
-    failed: { label: '失败', color: '#dc2626' },
-    running: { label: '处理中', color: '#8a8f99' },
+    success: { label: '成功', color: 'var(--el-color-success)' },
+    no_results: { label: '未命中', color: 'var(--el-color-warning)' },
+    failed: { label: '失败', color: 'var(--el-color-danger)' },
+    running: { label: '处理中', color: 'var(--el-text-color-placeholder)' },
   }
   return Object.entries(meta).map(([status, item]) => {
     const count = byStatus[status] ?? 0
@@ -249,12 +254,12 @@ const qaStatusRows = computed(() => {
 
 const docStatusRows = computed(() => {
   const byStatus = stats.value?.documents_by_status ?? {}
-  const meta: Record<string, { label: string; color: string }> = {
-    completed: { label: '已完成', color: '#16a34a' },
-    processing: { label: '处理中', color: '#d97706' },
-    failed: { label: '失败', color: '#dc2626' },
-    queued: { label: '排队中', color: '#8a8f99' },
-    deleting: { label: '删除中', color: '#8a8f99' },
+  const meta: Record<string, { label: string; tone: 'success' | 'warning' | 'danger' | 'info' }> = {
+    completed: { label: '已完成', tone: 'success' },
+    processing: { label: '处理中', tone: 'warning' },
+    failed: { label: '失败', tone: 'danger' },
+    queued: { label: '排队中', tone: 'info' },
+    deleting: { label: '删除中', tone: 'info' },
   }
   return Object.entries(meta)
     .map(([status, item]) => ({ status, ...item, count: byStatus[status] ?? 0 }))
@@ -429,12 +434,12 @@ onMounted(load)
 <template>
   <div v-loading="loading" class="dashboard">
     <template v-if="stats">
-      <div class="page-head">
-        <div>
-          <div class="page-title">统计概览</div>
-          <div class="page-desc">{{ rangeLabel }} · 关键指标与问答表现</div>
-        </div>
-        <div class="head-controls">
+      <PageHeader
+        title="统计概览"
+        eyebrow="运营总览"
+        :subtitle="`${rangeLabel} · 关键指标与问答表现`"
+      >
+        <template #actions>
           <el-date-picker
             v-model="range"
             type="daterange"
@@ -450,70 +455,47 @@ onMounted(load)
             class="range-picker"
             @change="load"
           />
-          <el-button :icon="Refresh" circle aria-label="刷新统计数据" @click="load" />
-        </div>
-      </div>
+          <button class="refresh-btn" type="button" title="刷新" @click="load">
+            <el-icon :class="{ spinning: loading }"><Refresh /></el-icon>
+          </button>
+        </template>
+      </PageHeader>
 
-      <section class="stat-cards">
-        <article class="stat-card" style="--accent: #4f46e5; --delay: 0ms">
-          <div class="stat-icon"><el-icon><Collection /></el-icon></div>
-          <div class="stat-body">
-            <div class="stat-value">{{ animated.kbs }}</div>
-            <div class="stat-label">活跃知识库</div>
-            <div class="stat-sub">活跃公司 {{ stats.companies_total }} 家</div>
-          </div>
-        </article>
-        <article class="stat-card" style="--accent: #3b82f6; --delay: 40ms">
-          <div class="stat-icon"><el-icon><Document /></el-icon></div>
-          <div class="stat-body">
-            <div class="stat-value">{{ animated.docs }}</div>
-            <div class="stat-label">文档总数</div>
-            <div class="stat-sub">
-              处理中 {{ stats.documents_by_status['processing'] ?? 0 }} ·
-              失败 {{ stats.documents_by_status['failed'] ?? 0 }}
-            </div>
-          </div>
-        </article>
-        <article class="stat-card" style="--accent: #0ea5e9; --delay: 80ms">
-          <div class="stat-icon"><el-icon><ChatDotRound /></el-icon></div>
-          <div class="stat-body">
-            <div class="stat-value">{{ animated.qa }}</div>
-            <div class="stat-label">问答总量</div>
-            <div class="stat-sub">
-              成功率 {{ successRate == null ? '—' : successRate + '%' }} ·
-              平均耗时 {{ formatDuration(avgDurationMs) }}
-            </div>
-          </div>
-        </article>
-        <article
-          class="stat-card pending"
-          style="--accent: #d97706; --delay: 120ms"
-          role="button"
-          tabindex="0"
-          @click="openPending"
-          @keydown.enter="openPending"
-        >
-          <div class="stat-icon"><el-icon><WarningFilled /></el-icon></div>
-          <div class="stat-body">
-            <div class="stat-value">{{ animated.pending }}</div>
-            <div class="stat-label">待补资料</div>
-            <div class="stat-sub">点击查看未命中 / 低分问答</div>
-          </div>
-        </article>
+      <section class="metric-grid">
+        <StatCard
+          label="活跃知识库"
+          :value="animated.kbs"
+          tone="primary"
+          :hint="`活跃公司 ${stats.companies_total} 家`"
+        />
+        <StatCard
+          label="文档总数"
+          :value="animated.docs"
+          :hint="`处理中 ${stats.documents_by_status['processing'] ?? 0} · 失败 ${stats.documents_by_status['failed'] ?? 0}`"
+        />
+        <StatCard
+          label="问答总量"
+          :value="animated.qa"
+          tone="success"
+          :hint="`成功率 ${successRate == null ? '—' : successRate + '%'} · 平均耗时 ${formatDuration(avgDurationMs)}`"
+        />
+        <button class="metric-btn" type="button" @click="openPending">
+          <StatCard
+            label="待补资料"
+            :value="animated.pending"
+            tone="warning"
+            hint="点击查看未命中 / 低分问答"
+          />
+        </button>
       </section>
 
       <section class="panels">
-        <el-card class="panel trend-panel">
-          <template #header>
-            <div class="panel-head">
-              <span>{{ rangeLabel }}问答趋势</span>
-              <span class="panel-hint">柱高为问答量 · 折线为成功数</span>
-            </div>
-          </template>
-          <div
-            class="chart-wrap"
-            @mouseleave="leaveBars"
-          >
+        <DataPanel
+          class="panel"
+          :title="`${rangeLabel}问答趋势`"
+          subtitle="柱高为问答量 · 折线为成功数"
+        >
+          <div class="chart-wrap" @mouseleave="leaveBars">
             <svg
               :key="`${stats.range?.start}-${stats.range?.end}`"
               class="trend-chart"
@@ -631,15 +613,9 @@ onMounted(load)
               <div class="tip-row"><span>tokens</span><b>{{ formatTokens(hoverPoint.total_tokens) }}</b></div>
             </div>
           </div>
-        </el-card>
+        </DataPanel>
 
-        <el-card class="panel status-panel">
-          <template #header>
-            <div class="panel-head">
-              <span>问答状态分布</span>
-              <span class="panel-hint">共 {{ stats.qa_total }} 条</span>
-            </div>
-          </template>
+        <DataPanel class="panel" title="问答状态分布" :count="`共 ${stats.qa_total} 条`">
           <div class="qa-status-list">
             <div v-for="row in qaStatusRows" :key="row.status" class="qa-status-row">
               <span class="qa-status-label">{{ row.label }}</span>
@@ -655,15 +631,14 @@ onMounted(load)
           <div class="doc-section">
             <div class="doc-section-title">文档处理状态</div>
             <div class="doc-chips">
-              <span
+              <StatusPill
                 v-for="row in docStatusRows"
                 :key="row.status"
-                class="doc-chip"
-                :style="{ color: row.color, borderColor: row.color + '55', background: row.color + '14' }"
-              >
-                {{ row.label }} {{ row.count }}
-              </span>
-              <span v-if="docStatusRows.length === 0" class="doc-chip empty">暂无文档</span>
+                :label="`${row.label} ${row.count}`"
+                :tone="row.tone"
+                :dot="false"
+              />
+              <StatusPill v-if="docStatusRows.length === 0" label="暂无文档" tone="info" :dot="false" />
             </div>
           </div>
           <div class="token-section">
@@ -721,46 +696,43 @@ onMounted(load)
               {{ formatTokens(cost.recent_unpriced_tokens) }} tokens 未计入金额
             </div>
           </div>
-        </el-card>
+        </DataPanel>
       </section>
 
       <template v-if="recent">
-        <section class="quality-strip">
-          <article class="quality-tile" style="--accent: #dc2626; --delay: 0ms">
-            <span class="quality-label">失败率</span>
-            <span class="quality-value">{{ formatPercent(recent.failure_rate) }}</span>
-            <span class="quality-sub">失败 {{ recent.qa_failed }} / 共 {{ recent.qa_total }} 条</span>
-          </article>
-          <article class="quality-tile" style="--accent: #d97706; --delay: 40ms">
-            <span class="quality-label">未命中率</span>
-            <span class="quality-value">{{ formatPercent(recent.no_result_rate) }}</span>
-            <span class="quality-sub">
-              未命中 {{ recent.qa_no_results }} / 共 {{ recent.qa_total }} 条
-            </span>
-          </article>
-          <article class="quality-tile" style="--accent: #6366f1; --delay: 80ms">
-            <span class="quality-label">检索 P90</span>
-            <span class="quality-value">{{ formatDuration(recent.latency.retrieval_p90_ms) }}</span>
-            <span class="quality-sub">P50 {{ formatDuration(recent.latency.retrieval_p50_ms) }}</span>
-          </article>
-          <article class="quality-tile" style="--accent: #4f46e5; --delay: 120ms">
-            <span class="quality-label">总耗时 P90</span>
-            <span class="quality-value">{{ formatDuration(recent.latency.total_p90_ms) }}</span>
-            <span class="quality-sub">
-              P50 {{ formatDuration(recent.latency.total_p50_ms) }} · 最大
-              {{ formatDuration(recent.latency.total_max_ms) }}
-            </span>
-          </article>
+        <section class="metric-grid">
+          <StatCard
+            label="失败率"
+            :value="formatPercent(recent.failure_rate)"
+            tone="danger"
+            :hint="`失败 ${recent.qa_failed} / 共 ${recent.qa_total} 条`"
+          />
+          <StatCard
+            label="未命中率"
+            :value="formatPercent(recent.no_result_rate)"
+            tone="warning"
+            :hint="`未命中 ${recent.qa_no_results} / 共 ${recent.qa_total} 条`"
+          />
+          <StatCard
+            label="检索 P90"
+            :value="formatDuration(recent.latency.retrieval_p90_ms)"
+            tone="primary"
+            :hint="`P50 ${formatDuration(recent.latency.retrieval_p50_ms)}`"
+          />
+          <StatCard
+            label="总耗时 P90"
+            :value="formatDuration(recent.latency.total_p90_ms)"
+            tone="primary"
+            :hint="`P50 ${formatDuration(recent.latency.total_p50_ms)} · 最大 ${formatDuration(recent.latency.total_max_ms)}`"
+          />
         </section>
 
         <section class="panels insights">
-          <el-card class="panel">
-            <template #header>
-              <div class="panel-head">
-                <span>耗时阶段分布</span>
-                <span class="panel-hint">RAG 样本 {{ recent.latency.sample_count }} 条 · 不含 FAQ 直出</span>
-              </div>
-            </template>
+          <DataPanel
+            class="panel"
+            title="耗时阶段分布"
+            :subtitle="`RAG 样本 ${recent.latency.sample_count} 条 · 不含 FAQ 直出`"
+          >
             <div v-if="hasLatency" class="stage-list">
               <div v-for="stage in latencyStages" :key="stage.key" class="stage-row">
                 <div class="stage-head">
@@ -781,20 +753,14 @@ onMounted(load)
               </div>
             </div>
             <div v-else class="panel-empty">{{ rangeLabel }}暂无耗时记录</div>
-          </el-card>
+          </DataPanel>
 
-          <el-card class="panel group-panel">
-            <template #header>
-              <div class="panel-head">
-                <span class="group-title">
-                  分组表现
-                  <span class="panel-hint">不含 FAQ 直出</span>
-                </span>
-                <el-radio-group v-model="groupMode" size="small">
-                  <el-radio-button value="models">按模型</el-radio-button>
-                  <el-radio-button value="knowledge_bases">按知识库</el-radio-button>
-                </el-radio-group>
-              </div>
+          <DataPanel class="panel" title="分组表现" subtitle="不含 FAQ 直出">
+            <template #actions>
+              <el-radio-group v-model="groupMode" size="small">
+                <el-radio-button value="models">按模型</el-radio-button>
+                <el-radio-button value="knowledge_bases">按知识库</el-radio-button>
+              </el-radio-group>
             </template>
             <div v-if="groupRows.length > 0" class="group-list">
               <div class="group-row group-head" :class="{ 'has-cost': groupMode === 'models' }">
@@ -827,11 +793,15 @@ onMounted(load)
               </div>
             </div>
             <div v-else class="panel-empty">{{ rangeLabel }}暂无分组数据</div>
-          </el-card>
+          </DataPanel>
         </section>
       </template>
     </template>
-    <el-empty v-else-if="!loading" description="暂无统计数据" />
+    <EmptyState
+      v-else-if="!loading"
+      title="暂无统计数据"
+      text="接入知识库并产生问答后，这里会显示指标、趋势与成本。"
+    />
   </div>
 </template>
 
@@ -841,98 +811,77 @@ onMounted(load)
   /* 右上角一层极淡的靛蓝氛围，避免整页纯灰底显得呆板。 */
   background: radial-gradient(720px 260px at 86% -60px, rgba(79, 70, 229, 0.07), transparent 70%);
 }
-.page-head {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 16px;
-  margin-bottom: 20px;
-}
-.head-controls {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-shrink: 0;
-}
 .range-picker {
   width: 268px;
 }
-.page-title {
-  font-size: 20px;
-  font-weight: 600;
-  letter-spacing: -0.2px;
-  color: var(--el-text-color-primary);
-}
-.page-desc {
-  margin-top: 4px;
-  font-size: 13px;
+/* 与页面头部小号控件同高，保持动作区一行对齐。 */
+.refresh-btn {
+  width: 24px;
+  height: 24px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 6px;
+  background: #fff;
   color: var(--el-text-color-secondary);
+  cursor: pointer;
+  transition: color 0.2s var(--kb-ease), border-color 0.2s var(--kb-ease);
+}
+.refresh-btn:hover {
+  color: var(--el-color-primary);
+  border-color: var(--el-color-primary-light-7);
+}
+.refresh-btn .el-icon {
+  font-size: 13px;
+}
+.spinning {
+  animation: spin 0.9s linear infinite;
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
-/* —— 统计卡：错峰淡入 + 数字滚动 —— */
-.stat-cards {
+/* —— 指标卡：等高空隙 + 错峰淡入 —— */
+.metric-grid {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
   gap: 16px;
 }
-.stat-card {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  padding: 18px;
-  background: #fff;
-  border: 1px solid var(--el-border-color);
-  border-radius: var(--el-border-radius-base);
-  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+/* 上下间距由 .panels 的 margin-top 承担，这里只补「面板之后再来一组指标」的情况。 */
+.panels + .metric-grid {
+  margin-top: 16px;
+}
+.metric-grid > * {
   animation: card-rise 0.3s var(--kb-ease) backwards;
-  animation-delay: var(--delay);
-  transition: border-color 0.2s var(--kb-ease), box-shadow 0.2s var(--kb-ease);
 }
-.stat-card:hover {
-  border-color: var(--el-border-color-dark);
-  box-shadow: 0 6px 16px rgba(15, 23, 42, 0.07);
+.metric-grid > *:nth-child(2) {
+  animation-delay: 40ms;
 }
-.stat-card.pending {
+.metric-grid > *:nth-child(3) {
+  animation-delay: 80ms;
+}
+.metric-grid > *:nth-child(4) {
+  animation-delay: 120ms;
+}
+.metric-btn {
+  padding: 0;
+  border: none;
+  background: none;
+  font-family: inherit;
+  text-align: left;
   cursor: pointer;
-  border-color: #f4d6b4;
-  transition: transform 0.15s var(--kb-ease), box-shadow 0.15s var(--kb-ease),
-    border-color 0.15s var(--kb-ease);
+  border-radius: var(--kb-panel-radius);
+  transition: transform 0.15s var(--kb-ease), box-shadow 0.15s var(--kb-ease);
 }
-.stat-card.pending:hover {
+.metric-btn:hover {
   transform: translateY(-1px);
-  border-color: #e4a051;
   box-shadow: 0 6px 16px rgba(217, 119, 6, 0.12);
 }
-.stat-card.pending:active {
+.metric-btn:active {
   transform: scale(0.99);
-}
-.stat-icon {
-  width: 40px;
-  height: 40px;
-  flex-shrink: 0;
-  display: grid;
-  place-items: center;
-  border-radius: 8px;
-  font-size: 19px;
-  color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 10%, #fff);
-}
-.stat-value {
-  font-size: 30px;
-  font-weight: 600;
-  line-height: 1.1;
-  font-variant-numeric: tabular-nums;
-  color: var(--el-text-color-primary);
-}
-.stat-label {
-  margin-top: 4px;
-  font-size: 13px;
-  color: var(--el-text-color-regular);
-}
-.stat-sub {
-  margin-top: 3px;
-  font-size: 12px;
-  color: var(--el-text-color-secondary);
 }
 @keyframes card-rise {
   from {
@@ -951,17 +900,6 @@ onMounted(load)
 }
 .panels .panel {
   animation: card-rise 0.32s var(--kb-ease) 0.06s backwards;
-}
-.panel-head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  font-weight: 600;
-}
-.panel-hint {
-  font-size: 12px;
-  font-weight: 400;
-  color: var(--el-text-color-secondary);
 }
 
 /* —— 趋势图：柱体生长 + 成功线描边 + 悬停提示 —— */
@@ -1131,17 +1069,6 @@ onMounted(load)
   flex-wrap: wrap;
   gap: 8px;
 }
-.doc-chip {
-  padding: 3px 10px;
-  border-radius: 4px;
-  border: 1px solid;
-  font-size: 12px;
-}
-.doc-chip.empty {
-  color: var(--el-text-color-secondary);
-  border-color: var(--el-border-color-lighter);
-  background: transparent;
-}
 
 .token-section {
   margin-top: 20px;
@@ -1296,56 +1223,6 @@ onMounted(load)
   color: #b45309;
 }
 
-/* —— 近 14 天质量与耗时 —— */
-.quality-strip {
-  margin-top: 16px;
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 16px;
-}
-.quality-tile {
-  position: relative;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  padding: 14px 16px 14px 18px;
-  background: #fff;
-  border: 1px solid var(--el-border-color);
-  border-radius: var(--el-border-radius-base);
-  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
-  overflow: hidden;
-  animation: card-rise 0.3s var(--kb-ease) backwards;
-  animation-delay: var(--delay);
-}
-.quality-tile::before {
-  content: '';
-  position: absolute;
-  left: 0;
-  top: 0;
-  bottom: 0;
-  width: 3px;
-  background: var(--accent);
-  opacity: 0.75;
-}
-.quality-label {
-  font-size: 12px;
-  color: var(--el-text-color-secondary);
-}
-.quality-value {
-  font-size: 22px;
-  font-weight: 600;
-  line-height: 1.25;
-  font-variant-numeric: tabular-nums;
-  color: var(--el-text-color-primary);
-}
-.quality-sub {
-  font-size: 12px;
-  color: var(--el-text-color-secondary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .insights {
   grid-template-columns: 1fr 1.25fr;
 }
@@ -1419,14 +1296,6 @@ onMounted(load)
   transform: translateX(-1px);
 }
 
-.group-panel .panel-head {
-  align-items: center;
-}
-.group-title {
-  display: inline-flex;
-  align-items: baseline;
-  gap: 8px;
-}
 .group-list {
   max-height: 248px;
   overflow-y: auto;
@@ -1481,33 +1350,20 @@ onMounted(load)
 }
 
 @media (max-width: 1100px) {
-  .stat-cards {
+  .metric-grid {
     grid-template-columns: repeat(2, 1fr);
   }
-  .quality-strip {
-    grid-template-columns: repeat(2, 1fr);
-  }
-  .panels {
-    grid-template-columns: 1fr;
-  }
+  .panels,
   .insights {
     grid-template-columns: 1fr;
   }
 }
 
 @media (max-width: 760px) {
-  .page-head {
-    flex-wrap: wrap;
-  }
-  .head-controls {
-    width: 100%;
-  }
   .range-picker {
-    flex: 1;
-    width: auto;
+    width: 220px;
   }
-  .stat-cards,
-  .quality-strip {
+  .metric-grid {
     grid-template-columns: 1fr;
   }
 }

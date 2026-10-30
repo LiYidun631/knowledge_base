@@ -4,6 +4,8 @@
 
 设计文档：[架构](ARCHITECTURE.md)、[数据库表结构](DATABASE_SCHEMA.md)、[接口文档](API_DOCUMENTATION.md)、[百度千帆 OCR 配置](OCR_HTTP_SERVICE.md)。
 
+核心链路（入库 → 检索 → 问答 → FAQ）的验收方案见 [测试文档](TESTING.md)，用例明细见 [验收用例表](TEST_CASES.md)。
+
 在线检索和问答已实现：默认组合 MySQL BM25 关键词召回与 Chroma 向量召回，再进行加权 RRF 融合；可选单独使用 BM25/向量，也支持知识库绑定的 Rerank 模型。`/ask` 会调用聊天模型生成答案，并保存来源快照和阶段日志。接口说明见 [在线检索设计与接口](ONLINE_RETRIEVAL_DESIGN.md)。
 
 ## 技术要求
@@ -19,7 +21,7 @@
 
 `main.py` 独立入口挂载 `require_service_auth`，业务请求携带 `Authorization: Bearer <Token>`。管理员侧按角色区分：`admin` 全权，`operator` 可创建公司与知识库并读写业务数据，`viewer` 只读；公司凭据管理、模型档案/单价、提示词与审计仅限 `admin`。公司 Token 只能操作状态为 `active` 的本公司及其全部子库、文档、图片、QA 记录和公司大库，不是子库级权限。**同一公司的多枚凭据共享全部公司权限，按项目分开发放只便于独立撤销，不构成项目级数据隔离。** 缺失/无效/停用/被替换的 Token 返回 `401`，显式跨公司参数或归档公司旧有效凭据返回 `403`，外公司资源 ID 返回 `404`。
 
-库内管理员凭据分三档角色：`admin` 全权、`operator` 运营（业务数据可读写，不能管理凭据、模型配置、提示词与审计）、`viewer` 只读；`.env` 引导 Token 固定为 `admin`。管理端写操作会写入 `audit_logs`（操作者快照、方法、路径、状态码、耗时、IP，不含请求体），保留 180 天；审计查询与导出仅 `admin` 可读。详见 [接口文档](API_DOCUMENTATION.md)。
+库内管理员凭据分三档角色：`admin` 全权、`operator` 运营（业务数据可读写，不能管理凭据、模型配置、提示词与审计）、`viewer` 只读；`.env` 引导 Token 固定为 `admin`。凭据可选开通登录账号与密码，管理页用 `POST /admin/login` 换发 7 天有效的会话 Token（`admin_sessions` 只存哈希），改密、停用或重置凭据都会立即撤销该凭据的全部会话；长期 Token 与引导 Token 仍可直接登录。管理端写操作会写入 `audit_logs`（操作者快照、方法、路径、状态码、耗时、IP，不含请求体），保留 180 天；审计查询与导出仅 `admin` 可读。详见 [接口文档](API_DOCUMENTATION.md)。
 
 真实数据库迁移及实际 `.env` 更新仍待核对目标与备份，本文不表示已执行。确认 `KNOWLEDGE_SERVICE_DATABASE_URL` 指向预期数据库并备份后，再从 `E:\llmpython\knowledge_base` 执行以下部署步骤；迁移 `0025_multi_company_credentials` 会把 `0014_company_credentials` 建立的单凭据表升级为多凭据表，已有 Token 原样保留并标记为「默认凭据」，不需要客户端换 Token。
 

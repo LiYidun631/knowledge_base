@@ -488,6 +488,8 @@ def _collect_stream_events(
     query: str = "退款期限是多少？",
     faq=None,
     faq_objects: dict | None = None,
+    product_name: str | None = None,
+    model_name: str | None = None,
 ) -> list[tuple[str, dict]]:
     """驱动 _stream_qa_events 并解析出 (事件名, 数据) 序列。"""
     settings = Settings(
@@ -558,7 +560,12 @@ def _collect_stream_events(
     monkeypatch.setattr(answer_module, "match_faq", fake_match_faq)
 
     payload = KnowledgeAnswerRequest(
-        query=query, top_k=5, retrieval_mode="hybrid", include_context=True
+        query=query,
+        top_k=5,
+        retrieval_mode="hybrid",
+        include_context=True,
+        product_name=product_name,
+        model_name=model_name,
     )
 
     async def collect() -> list[tuple[str, dict]]:
@@ -650,6 +657,50 @@ def test_stream_qa_events_emit_clarification_done_without_model(monkeypatch) -> 
     assert done["clarification_required"] is True
     assert done["clarification_options"] == ["A 型", "B 型"]
     assert "success" in finished
+
+
+def test_stream_qa_events_skip_clarification_when_model_pinned(monkeypatch) -> None:
+    """问答测试页已选定型号时直接作答，即使资料标签跨多个型号也不再反问。"""
+
+    result_a = _stream_result()
+    # 一份同时挂在 A 型与 B 型下的通用资料：型号选项因此不止一个。
+    result_shared = SimpleNamespace(
+        **{**vars(_stream_result()), "model_name": None, "model_names": ["A 型", "B 型"]}
+    )
+
+    async def fake_search(*_args, **_kwargs):
+        return [result_a, result_shared]
+
+    async def fake_stream(*_args, **_kwargs):
+        yield "清洁时用拧干的湿布擦拭外壳。"
+
+    finished: dict[str, object] = {}
+    events = _collect_stream_events(
+        monkeypatch,
+        search=fake_search,
+        stream=fake_stream,
+        finished=finished,
+        query="怎么清洁产品？",
+        product_name="耳温计",
+        model_name="A 型",
+    )
+
+    assert [name for name, _ in events] == ["meta", "delta", "done"]
+    assert events[-1][1]["clarification_required"] is False
+
+
+def test_needs_model_choice_only_skips_when_model_pinned() -> None:
+    """澄清判定：单型号或请求已带型号都不追问，只选产品时仍要问型号。"""
+
+    options = ["A 型", "B 型"]
+    free = KnowledgeAnswerRequest(query="怎么清洁？")
+    product_only = KnowledgeAnswerRequest(query="怎么清洁？", product_name="耳温计")
+    pinned = KnowledgeAnswerRequest(query="怎么清洁？", product_name="耳温计", model_name="A 型")
+
+    assert answer_module._needs_model_choice(free, options) is True
+    assert answer_module._needs_model_choice(product_only, options) is True
+    assert answer_module._needs_model_choice(pinned, options) is False
+    assert answer_module._needs_model_choice(free, ["A 型"]) is False
 
 
 def test_stream_qa_events_faq_direct_answer_skips_search_and_model(monkeypatch) -> None:

@@ -4,6 +4,10 @@ import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { client, errorMessage } from '../api/client'
 import { canWrite } from '../api/session'
+import PageHeader from '../components/ui/PageHeader.vue'
+import DataPanel from '../components/ui/DataPanel.vue'
+import FilterBar from '../components/ui/FilterBar.vue'
+import EmptyState from '../components/ui/EmptyState.vue'
 
 interface CatalogEntry {
   id: string
@@ -49,6 +53,9 @@ const filteredEntries = computed(() => {
     )
   })
 })
+
+// 筛选态区分「目录为空」和「筛不到」，空态文案不同。
+const isFiltered = computed(() => Boolean(searchText.value.trim() || productFilter.value))
 
 async function loadEntries() {
   loading.value = true
@@ -175,91 +182,109 @@ onMounted(() => {
 </script>
 
 <template>
-  <el-card>
-    <template #header>
-      <div class="head-row">
-        <span class="head-title"><el-icon><Goods /></el-icon>产品目录</span>
-        <span class="head-count">共 {{ entries.length }} 条</span>
-      </div>
-    </template>
-
-    <el-alert
-      type="info"
-      :closable="false"
-      show-icon
-      title="目录为全公司通用的一份，不挂在任何知识库下；任意知识库上传文件时从这里选择产品名称与型号。"
-      class="tip"
-    />
-
-    <div class="controls-row">
-      <template v-if="canWrite">
-        <el-input
-          v-model="addForm.productName"
-          maxlength="200"
-          placeholder="产品名称，如：体温计"
-          class="add-input"
-          @keyup.enter="createEntry"
-        />
-        <el-input
-          v-model="addForm.modelName"
-          maxlength="200"
-          placeholder="产品型号，如：额式体温计"
-          class="add-input"
-          @keyup.enter="createEntry"
-        />
-        <el-button type="primary" :loading="addForm.submitting" @click="createEntry">
-          添加条目
-        </el-button>
-        <el-divider direction="vertical" class="controls-divider" />
-      </template>
-      <el-input
-        v-model="searchText"
-        clearable
-        placeholder="搜索产品名称或型号"
-        class="search-input"
-      >
-        <template #prefix><el-icon><Search /></el-icon></template>
-      </el-input>
-      <el-select
-        v-model="productFilter"
-        clearable
-        placeholder="按产品名称筛选"
-        class="filter-select"
-      >
-        <el-option v-for="name in productNames" :key="name" :label="name" :value="name" />
-      </el-select>
-      <el-button
-        v-if="canWrite"
-        type="danger"
-        plain
-        :disabled="selectedRows.length === 0"
-        @click="batchRemove"
-      >
-        批量删除{{ selectedRows.length > 0 ? `（${selectedRows.length}）` : '' }}
-      </el-button>
-    </div>
-
-    <el-table
-      :data="filteredEntries"
-      v-loading="loading"
-      empty-text="目录为空，请在上方添加产品名称与型号"
-      @selection-change="onSelectionChange"
+  <div class="catalog-page">
+    <PageHeader
+      title="产品目录"
+      eyebrow="产品与型号"
+      subtitle="全公司通用的一份目录，不挂在任何知识库下 · 上传文件时从这里选择产品名称与型号"
     >
-      <el-table-column v-if="canWrite" type="selection" width="46" />
-      <el-table-column prop="product_name" label="产品名称" min-width="200" />
-      <el-table-column prop="model_name" label="产品型号" min-width="240" />
-      <el-table-column label="登记时间" width="180">
-        <template #default="{ row }">{{ formatDateTime(row.created_at) }}</template>
-      </el-table-column>
-      <el-table-column v-if="canWrite" label="操作" width="140" fixed="right">
-        <template #default="{ row }">
-          <div class="catalog-actions">
-            <el-button size="small" text type="primary" @click="openEdit(row)">编辑</el-button>
-            <el-button size="small" text type="danger" @click="removeEntry(row)">删除</el-button>
-          </div>
+      <template #meta>
+        <span class="header-count">
+          共 {{ entries.length }} 条<template v-if="isFiltered"> · 筛选后 {{ filteredEntries.length }} 条</template>
+        </span>
+      </template>
+    </PageHeader>
+
+    <DataPanel flush>
+      <div class="panel-toolbar">
+        <FilterBar>
+          <template v-if="canWrite">
+            <el-input
+              v-model="addForm.productName"
+              maxlength="200"
+              placeholder="产品名称，如：体温计"
+              class="add-input"
+              @keyup.enter="createEntry"
+            />
+            <el-input
+              v-model="addForm.modelName"
+              maxlength="200"
+              placeholder="产品型号，如：额式体温计"
+              class="add-input"
+              @keyup.enter="createEntry"
+            />
+            <el-button type="primary" :loading="addForm.submitting" @click="createEntry">
+              添加条目
+            </el-button>
+            <span class="toolbar-divider" aria-hidden="true" />
+          </template>
+          <el-input
+            v-model="searchText"
+            clearable
+            placeholder="搜索产品名称或型号"
+            class="search-input"
+          >
+            <template #prefix><el-icon><Search /></el-icon></template>
+          </el-input>
+          <el-select
+            v-model="productFilter"
+            clearable
+            placeholder="按产品名称筛选"
+            class="filter-select"
+          >
+            <el-option v-for="name in productNames" :key="name" :label="name" :value="name" />
+          </el-select>
+          <template #actions>
+            <el-button
+              v-if="canWrite"
+              type="danger"
+              plain
+              :disabled="selectedRows.length === 0"
+              @click="batchRemove"
+            >
+              批量删除{{ selectedRows.length > 0 ? `（${selectedRows.length}）` : '' }}
+            </el-button>
+          </template>
+        </FilterBar>
+      </div>
+
+      <el-table
+        :data="filteredEntries"
+        v-loading="loading"
+        row-key="id"
+        @selection-change="onSelectionChange"
+      >
+        <template #empty>
+          <EmptyState
+            :title="isFiltered ? '没有匹配的目录条目' : '目录还是空的'"
+            :text="
+              isFiltered
+                ? '换个关键词，或清空产品名称筛选。'
+                : canWrite
+                  ? '在上方填写产品名称与型号，添加后上传文件即可选到该标签。'
+                  : '等待管理员添加产品名称与型号。'
+            "
+            :muted="isFiltered"
+          />
         </template>
-      </el-table-column>
-    </el-table>
+        <el-table-column v-if="canWrite" type="selection" width="46" />
+        <el-table-column prop="product_name" label="产品名称" min-width="200" show-overflow-tooltip />
+        <el-table-column prop="model_name" label="产品型号" min-width="240" show-overflow-tooltip />
+        <el-table-column label="登记时间" width="168">
+          <template #default="{ row }">
+            <span class="cell-time">{{ formatDateTime(row.created_at) }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column v-if="canWrite" label="操作" width="140" fixed="right">
+          <template #default="{ row }">
+            <div class="catalog-actions">
+              <el-button size="small" text type="primary" @click="openEdit(row)">编辑</el-button>
+              <el-button size="small" text type="danger" @click="removeEntry(row)">删除</el-button>
+            </div>
+          </template>
+        </el-table-column>
+      </el-table>
+    </DataPanel>
 
     <el-dialog v-model="editForm.open" title="修改目录条目" width="440px">
       <el-alert
@@ -284,46 +309,37 @@ onMounted(() => {
         </el-button>
       </template>
     </el-dialog>
-  </el-card>
+  </div>
 </template>
 
 <style scoped>
-.head-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-.head-title {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  color: var(--el-color-primary);
-}
-.head-count {
-  font-size: 13px;
+.header-count {
+  font-size: var(--kb-font-xs);
   color: var(--el-text-color-secondary);
+  font-variant-numeric: tabular-nums;
 }
-.tip {
-  margin-bottom: 14px;
-}
-.controls-row {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 10px;
-  margin-bottom: 14px;
-}
-.controls-divider {
-  height: 22px;
+.panel-toolbar {
+  padding: 14px 18px 0;
 }
 .add-input {
   width: 190px;
 }
 .search-input {
-  width: 230px;
+  width: 220px;
 }
 .filter-select {
   width: 170px;
+}
+.toolbar-divider {
+  flex: none;
+  width: 1px;
+  height: 18px;
+  background: var(--el-border-color);
+}
+.cell-time {
+  font-size: var(--kb-font-xs);
+  color: var(--el-text-color-regular);
+  font-variant-numeric: tabular-nums;
 }
 /* 操作按钮保持单行 */
 .catalog-actions {
@@ -348,7 +364,7 @@ onMounted(() => {
 .edit-label {
   display: block;
   margin-bottom: 6px;
-  font-size: 13px;
+  font-size: var(--kb-font-sm);
   color: var(--el-text-color-regular);
 }
 </style>

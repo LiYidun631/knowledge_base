@@ -54,6 +54,8 @@ interface ChatMessage {
   content: string
   sources: AnswerSource[]
   clarification: { question: string; options: string[] } | null
+  // 本轮实际提问的问题：点澄清选项时要拿它重问，不能只发型号。
+  askedQuery?: string
   streaming?: boolean
   qaRecordId?: string
   companyId?: string
@@ -396,22 +398,43 @@ async function streamAsk(kbId: string, companyId: string, text: string, messageI
   scrollToBottom(true)
 }
 
-async function ask(forcedQuestion?: string) {
-  const text = (forcedQuestion ?? question.value).trim()
+// 澄清后的回答既可能来自点按钮，也可能来自手输型号：两种都按「补全上一轮问题」处理。
+function matchPendingClarification(text: string) {
+  const pending = [...messages.value].reverse().find((item) => item.clarification)
+  const clarification = pending?.clarification
+  if (!clarification) return null
+  const normalized = text.trim().toLowerCase()
+  const option = clarification.options.find((item) => item.trim().toLowerCase() === normalized)
+  return option ? { option, asked: pending?.askedQuery?.trim() ?? '' } : null
+}
+
+async function ask(forcedQuestion?: string, displayText?: string) {
+  let text = (forcedQuestion ?? question.value).trim()
   if (!text) return
   const kb = selectedKb.value
   if (!kb || !kb.company_id) {
     ElMessage.warning('请先选择知识库')
     return
   }
+  // 只回了一个型号时，把它钉进控制栏并沿用上一轮的问题，否则等于拿型号当整句话检索。
+  let shown = text
+  if (forcedQuestion === undefined) {
+    const pending = matchPendingClarification(text)
+    if (pending) {
+      modelName.value = pending.option
+      if (pending.asked) text = pending.asked
+    }
+  }
+  if (displayText?.trim()) shown = displayText.trim()
   question.value = ''
-  messages.value.push({ role: 'user', content: text, sources: [], clarification: null })
+  messages.value.push({ role: 'user', content: shown, sources: [], clarification: null })
   const messageIndex = messages.value.length
   messages.value.push({
     role: 'assistant',
     content: '',
     sources: [],
     clarification: null,
+    askedQuery: text,
     streaming: true,
     companyId: kb.company_id,
   })
@@ -424,6 +447,12 @@ async function ask(forcedQuestion?: string) {
     const message = messages.value[messageIndex]
     if (message) message.streaming = false
   }
+}
+
+function answerClarification(message: ChatMessage, option: string) {
+  // 点型号按钮即回答澄清：气泡显示型号，实际重问这一轮的原问题。
+  modelName.value = option
+  ask(message.askedQuery?.trim() || option, option)
 }
 
 onMounted(async () => {
@@ -593,7 +622,7 @@ async function submitDownFeedback() {
                 :key="option"
                 size="small"
                 round
-                @click="ask(option)"
+                @click="answerClarification(message, option)"
               >
                 {{ option }}
               </el-button>

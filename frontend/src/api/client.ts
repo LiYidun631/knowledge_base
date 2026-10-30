@@ -25,13 +25,13 @@ client.interceptors.request.use((config) => {
   return config
 })
 
-// 401 说明 Token 失效，清除并回到登录页；403 说明操作需要管理员权限，仅提示。
+// 401 说明凭据失效（会话过期或 Token 被撤销），清除并回到登录页；403 说明角色不够，仅提示。
 let unauthorizedHandler: (() => void) | null = null
 
 export function handleAuthStatus(status: number): void {
   if (status === 401) {
     clearToken()
-    ElMessage.error('管理员 Token 无效，请重新输入')
+    ElMessage.error('登录已过期或凭据失效，请重新登录')
     unauthorizedHandler?.()
   } else if (status === 403) {
     ElMessage.error('权限不足：该操作需要更高的角色')

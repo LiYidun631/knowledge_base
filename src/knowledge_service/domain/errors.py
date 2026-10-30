@@ -38,6 +38,10 @@ class FolderNotFound(Exception):
     """目录不存在或不属于指定知识库。"""
 
 
+class DocumentNotFound(Exception):
+    """逻辑文档不存在。"""
+
+
 class FolderNotEmpty(Exception):
     """目录下仍有子目录或文件，不能删除。"""
 

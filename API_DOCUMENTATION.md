@@ -1,7 +1,7 @@
 # 知识库接口文档
 
-版本：v0.13
-更新日期：2026-10-28
+版本：v0.14
+更新日期：2026-10-29
 
 知识库 API 支持两种运行方式：独立运行 `knowledge_base` 时，代码默认地址为 `http://127.0.0.1:8000/api/v1`，当前本机及 `.env.example` 配置为 `http://127.0.0.1:8333/api/v1`；嵌入宿主时使用宿主的监听地址和 `/api/v1` 前缀。
 
@@ -9,7 +9,8 @@
 
 - 有效管理员 Token 可跨公司管理；创建公司 `POST /companies` 与旧版 `POST /knowledge-bases` 需 `admin` 或 `operator` 角色（`viewer` 返回 `403`），公司凭据签发/重置/停用接口仅限 `admin`。管理员 Token 有两个来源：`.env` 的 `KNOWLEDGE_SERVICE_AUTH_ADMIN_TOKEN`（引导 Token，始终有效，作为遗忘凭据时的兜底入口）和库内 `admin_credentials` 表（管理员 API 签发，见「管理员凭据（多管理员）」）。有效公司 Token 调用仅管理员接口返回 `403`；无效 Token 返回 `401`。
 - 库内管理员凭据分三档角色：`admin` 全权、`operator` 运营（可读写业务数据，不能管理凭据、模型档案/单价、提示词与审计）、`viewer` 只读（只允许 GET，问答与检索 POST 仍可用）。`.env` 引导 Token 固定按 `admin`。管理员专属资源（`/admin/credentials*`、`/companies/{company_id}/tokens*`、`/admin/model-profiles*`、`/admin/model-prices*`、`/admin/prompts*`、`/admin/audit-logs*`）对非 `admin` 角色一律返回 `403`。
-- 管理端写操作（POST/PUT/PATCH/DELETE）在响应后写入 `audit_logs`，记录操作者名称与角色快照、方法、路径、状态码、耗时和客户端 IP，不保存请求体；日志保留 180 天，服务启动时清理更早记录。
+- 管理端登录方式有两种：**账号密码**与**长期 Token**。管理员凭据可选开通 `username` + `password`，`POST /admin/login` 校验通过后换发 7 天有效的短期会话 Token（`kas_` 前缀，库内只存 SHA-256 哈希），后续请求仍按 `Authorization: Bearer <会话 Token>` 使用；长期 Token（`ka_`）与 `.env` 引导 Token 的用法不变，两者可共存。改密、停用或重置凭据都会立即撤销该凭据的全部会话。`/admin/login` 是唯一的匿名写入口，按来源 IP 限流（5 分钟内失败 5 次返回 `429`），失败统一返回「账号或密码不正确」，不暴露账号是否存在。
+- 管理端写操作（POST/PUT/PATCH/DELETE）在响应后写入 `audit_logs`，记录操作者名称与角色快照、方法、路径、状态码、耗时和客户端 IP，不保存请求体；日志保留 180 天，服务启动时清理更早记录。登录请求此时还没有身份，不入审计表。
 - 公司 Token 只允许操作状态为 `active` 的本公司全部子库、文档、图片、QA 记录及公司大库，不提供子库级权限。缺失、无效、停用或被替换的 Token 返回 `401`；归档公司旧有效凭据返回 `403`。显式 `company_id` 与凭证不匹配返回 `403`，跨公司资源 ID 返回 `404`；UUID 无效返回 `422`。
 - 公司 Token 由管理员 API 签发，同一公司可签发多枚、按项目命名并独立重置或停用；服务端每请求查 `company_credentials` 的 SHA-256 哈希与启用状态，无鉴权缓存。多枚凭据只对应多个项目的接入身份，**权限仍以公司为边界，不做项目级数据隔离**。重置/停用对后续新请求立即生效，无需重启服务端，不中断已在途请求。普通公司 Token 不得签发、重置或停用本公司或其他公司的凭据。`health_manager_ai` 只填 API 签发的对应公司 Token，严禁填管理员 Token。
 - 旧环境映射 `KNOWLEDGE_SERVICE_AUTH_COMPANY_TOKENS` 已彻底不再支持。迁移 `0014_company_credentials`（父版本 `0013_document_asset_markers`）只建空表，不自动生成已有公司凭据，也不导入旧映射；管理员须重新签发。迁移 `0025_multi_company_credentials` 把单凭据表升级为多凭据表，已有凭据原地保留为「默认凭据」，旧 Token 继续有效。真实数据库迁移及实际 `.env` 更新仍待核对目标与备份，不代表已执行。
@@ -56,11 +57,13 @@
 | PUT | `/admin/model-prices` | 按模型名新增或覆盖 token 单价，返回最新记录（仅管理员） |
 | DELETE | `/admin/model-prices/{model_price_id}` | 删除模型单价（仅管理员，204；不存在 404） |
 | GET | `/admin/credentials` | 列出库内管理员凭据，不返回哈希或明文（仅管理员） |
-| POST | `/admin/credentials` | 创建管理员凭据，可指定 `role`，明文 Token 仅本次返回（仅管理员，201） |
-| POST | `/admin/credentials/{admin_credential_id}/reset` | 重置管理员 Token 并启用（仅管理员，200） |
-| PATCH | `/admin/credentials/{admin_credential_id}` | 调整角色或启停管理员凭据（仅管理员，200） |
+| POST | `/admin/credentials` | 创建管理员凭据，可指定 `role` 与可选 `username`/`password`，明文 Token 仅本次返回（仅管理员，201） |
+| POST | `/admin/credentials/{admin_credential_id}/reset` | 重置管理员 Token 并启用，同时撤销该凭据会话（仅管理员，200） |
+| PATCH | `/admin/credentials/{admin_credential_id}` | 调整角色、启停或维护登录账号密码（仅管理员，200；账号被占用 409） |
 | DELETE | `/admin/credentials/{admin_credential_id}` | 删除管理员凭据（仅管理员，204） |
-| GET | `/admin/me` | 当前管理员身份、角色与是否环境引导 Token（任意有效管理员侧 Token） |
+| POST | `/admin/login` | 账号密码换发 7 天会话 Token（**公开接口，无需 Authorization**，200；密码错误 401，限流 429） |
+| POST | `/admin/logout` | 撤销当前会话 Token（携带管理员 Bearer，204；长期 Token 无会话可撤销同样返回 204） |
+| GET | `/admin/me` | 当前管理员身份、角色与是否环境引导 Token（任意有效管理员侧凭据） |
 | GET | `/admin/audit-logs?actor_name=&method=&path=&start_time=&end_time=` | 管理端写操作审计分页（仅 `admin`） |
 | GET | `/admin/audit-logs/export` | 按同款筛选导出审计 CSV，单次上限 5 万条（仅 `admin`） |
 | GET | `/product-catalog?q=...&product_name=...` | 查询全局产品目录（管理员或有效公司 Token） |
@@ -126,6 +129,8 @@
 | PATCH | `/knowledge-bases/{knowledge_base_id}/folders/{folder_id}` | 重命名或移动目录；`parent_id` 传 null 移到根目录 |
 | DELETE | `/knowledge-bases/{knowledge_base_id}/folders/{folder_id}` | 删除空目录；目录下仍有子目录或文件时返回 409 |
 | PATCH | `/documents/{document_id}` | 移动文档到目录；`folder_id` 传 null 移到根目录 |
+| PATCH | `/documents/{document_id}/product-labels` | 覆盖文档的产品名称与型号标签，立即影响检索过滤、型号澄清与 FAQ 匹配；不会重新解析或重建向量，空列表表示清空（按通用资料参与检索） |
+| POST | `/documents/product-labels/batch` | 批量覆盖多个文档的产品名称与型号标签；任一文档不存在或所属知识库已归档时整批不生效 |
 | GET | `/documents/{document_id}/versions/{document_version_id}/chunks?offset=0&limit=100` | 切块预览：分页返回父块文本、字符数、页码、章节路径与块类型，附父块/子块总数与父块总字数 |
 
 ## 公司、大库和子库
@@ -289,10 +294,10 @@ Content-Type: application/json
 ```
 
 ```json
-{ "name": "值班管理员", "role": "operator" }
+{ "name": "值班管理员", "role": "operator", "username": "zhangsan", "password": "example-pass-8" }
 ```
 
-`role` 可选，默认 `admin`，取值 `admin` / `operator` / `viewer`；非法值返回 `422`。成功 `201`，响应含 `admin_credential_id` 与一次性 `token`（`ka_` + `secrets.token_urlsafe(32)`），响应头 `Cache-Control: no-store`。库内 `admin_credentials` 仅存 SHA-256 哈希、角色与启用状态；`.env` 引导 Token 不在此列且始终有效，即使误删全部库内凭据也能恢复管理入口。
+`role` 可选，默认 `admin`，取值 `admin` / `operator` / `viewer`；非法值返回 `422`。`username`、`password` 都可选，用于开通账号密码登录：填了 `username` 必须同时填 `password`，否则 `400`；账号长度 3–60、统一按小写保存且全库唯一，密码长度 8–128、只存 PBKDF2-HMAC-SHA256 哈希。成功 `201`，响应含 `admin_credential_id` 与一次性 `token`（`ka_` + `secrets.token_urlsafe(32)`），响应头 `Cache-Control: no-store`；账号已被占用返回 `409`。库内 `admin_credentials` 仅存 Token 哈希、密码哈希、账号、角色与启用状态；`.env` 引导 Token 不在此列且始终有效，即使误删全部库内凭据也能恢复管理入口。
 
 重置（旧 Token 立即失效，新明文仅本次返回，`200`；角色不变并强制启用）：
 
@@ -301,7 +306,7 @@ POST $base/admin/credentials/{admin_credential_id}/reset
 Authorization: Bearer <管理员 Token>
 ```
 
-修改角色或启停（`200`，返回更新后的凭据信息；两个字段都可选）：
+修改角色、启停或登录账号密码（`200`，返回更新后的凭据信息；四个字段都可选，只提交要改的字段）：
 
 ```http
 PATCH $base/admin/credentials/{admin_credential_id}
@@ -310,8 +315,39 @@ Content-Type: application/json
 ```
 
 ```json
-{ "role": "viewer", "is_enabled": true }
+{ "role": "viewer", "is_enabled": true, "username": "zhangsan", "password": "new-pass-2026" }
 ```
+
+`username` 传空字符串表示收回账号密码登录（连同会话一起撤销）；改密码会立即撤销该凭据已签发的全部会话，长期 Token 不受影响。响应字段含 `username`（未开通为 `null`）与 `has_password`，绝不返回密码或哈希。账号被其他凭据占用返回 `409`。
+
+#### 管理端登录（账号密码换会话）
+
+登录页默认使用账号密码，避免长 Token 难以输入；`/admin/login` 是唯一不要求 `Authorization` 的接口。
+
+```http
+POST $base/admin/login
+Content-Type: application/json
+```
+
+```json
+{ "username": "zhangsan", "password": "example-pass-8" }
+```
+
+成功 `200`，响应头 `Cache-Control: no-store`：
+
+```json
+{
+  "token": "kas_...",
+  "token_type": "Bearer",
+  "expires_at": "2026-11-05T09:12:33",
+  "name": "张三",
+  "admin_role": "operator"
+}
+```
+
+`token` 以 `kas_` 开头，有效期 7 天（`ADMIN_SESSION_TTL`），库内 `admin_sessions` 只存其 SHA-256 哈希与过期时间；把它当作普通 Bearer 携带即可，角色与名称取自所属凭据。凭据停用、删除、重置或改密都会立即撤销会话；过期会话在下次登录时顺带清理。
+
+失败：账号或密码不正确、账号未开通或凭据已停用统一返回 `401`「账号或密码不正确」；同一来源 IP 5 分钟内失败满 5 次返回 `429` 并带 `Retry-After`。退出登录调用 `POST $base/admin/logout`（携带当前会话 Bearer，`204`）；用长期 Token 或引导 Token 调用同样返回 `204`，只是没有会话可撤销。
 
 删除（`204`，无响应体）：
 
@@ -572,6 +608,45 @@ DELETE $base/documents/{document_id}
 
 无请求体。该兼容接口按知识库内部文档 UUID 删除全部版本和知识库侧数据；后台原文件不删除。
 
+#### 修改文档产品标签
+
+```http
+PATCH $base/documents/{document_id}/product-labels
+Content-Type: application/json
+```
+
+```json
+{
+  "product_names": ["体温计"],
+  "model_names": ["YK-IRT3"]
+}
+```
+
+覆盖写入文档的产品名称与型号，用于入库后修正错标或补标。标签保存在文档元数据中，检索过滤、型号澄清与 FAQ 匹配都在查询期实时读取，因此保存后立即生效，**不会重新解析文件，也不会重建向量**。传空列表表示清空标签，该文档此后按通用资料参与检索（任何产品过滤下都可能被召回）。
+
+同一 `document_id` 下的全部版本共享这组标签，只改标签、不动版本与切块。产品名称与型号必须已在全局产品目录登记，未登记返回 `422`；文档不存在返回 `404`；所属知识库已归档返回 `409`。
+
+批量覆盖多个文档（管理页勾选多个文件时使用）：
+
+```http
+POST $base/documents/product-labels/batch
+Content-Type: application/json
+```
+
+```json
+{
+  "document_ids": ["8a1b...", "9c2d..."],
+  "product_names": ["体温计"],
+  "model_names": ["YK-IRT3"]
+}
+```
+
+```json
+{ "updated_ids": ["8a1b...", "9c2d..."] }
+```
+
+语义与单个接口一致，所有文档写入同一组标签。整批要么全部生效，要么全部不生效：任一文档不存在返回 `404`，任一所属知识库已归档返回 `409`。`document_ids` 单次最多 200 个。
+
 ### 6. 文件向量删除
 
 #### 删除单个文件向量
@@ -633,7 +708,7 @@ Content-Type: application/json
 }
 ```
 
-问答接口的请求体与检索接口相同，`include_context` 默认值为 `true`。上传文件时可通过 `product_name` 和 `model_name` 记录产品及型号元数据；当一次检索命中多个不同型号且用户问题未指定型号时，接口会返回 `clarification_required=true`、`clarification_question` 和 `clarification_options`，不会混合多个型号生成答案。每个 `sources[].source` 都包含 `file_id`，对应上传时提交的后台文件 ID，后台可据此拼接原文件下载地址。
+问答接口的请求体与检索接口相同，`include_context` 默认值为 `true`。上传文件时可通过 `product_name` 和 `model_name` 记录产品及型号元数据；当一次检索命中多个不同型号且用户问题未指定型号时，接口会返回 `clarification_required=true`、`clarification_question` 和 `clarification_options`，不会混合多个型号生成答案。请求体已指定 `model_name` 时视为调用方已确认型号，接口不再追问，直接按该型号作用域作答；只指定 `product_name` 时资料仍可能跨多型号，会继续追问。每个 `sources[].source` 都包含 `file_id`，对应上传时提交的后台文件 ID，后台可据此拼接原文件下载地址。
 
 #### 查询问答记录
 
@@ -786,6 +861,8 @@ curl.exe -X POST "$base/knowledge-bases/$kbId/documents?company_id=$companyId&fi
 - `PATCH /documents/{document_id}`：请求体 `{"folder_id": "<目录 UUID>"}` 移动文档，传 `null` 移到根目录；目录必须属于文档所在知识库，否则 `404`。
 
 知识库归档后，目录的创建、重命名、移动、删除以及文档移动统一返回 `409`；恢复为 `active` 后可继续操作。
+
+文档产品标签可在入库后通过 `PATCH /documents/{document_id}/product-labels` 或 `POST /documents/product-labels/batch` 覆盖修改，立即影响检索过滤；同样受归档只读限制（`409`）。
 
 ### 全局产品目录
 
@@ -1225,7 +1302,7 @@ PUT /admin/model-prices
 
 ## 本地运行
 
-独立验证时从 `E:\llmpython\knowledge_base` 执行，使用本项目 `.env` 的 `KNOWLEDGE_SERVICE_DATABASE_URL`；嵌入 `test_agent` 时使用宿主原有的数据库配置。真实数据库迁移及实际 `.env` 更新仍待核对目标与备份，以下为待执行的部署步骤，不表示已完成。确认目标并备份后执行迁移和模型初始化；`0014_company_credentials`（父版本 `0013_document_asset_markers`）只建空表，不生成或导入公司凭据；`0025_multi_company_credentials`（父版本 `0024_qa_faq_matched`）把单凭据升级为多凭据，已有凭据保留为「默认凭据」；`0029_feedback_loop`（父版本 `0028_column_comments`）为 `qa_records` 与 `project_qa_traces` 增加反馈字段和复核状态；`0030_retrieval_evaluation`（父版本 `0029_feedback_loop`）新建 `evaluation_sets`、`evaluation_cases`、`evaluation_runs`、`evaluation_case_results` 四张评测表，均为空表；`0031_rename_app_project`（父版本 `0030_retrieval_evaluation`）把接入项目 `test_agent` 就地改名为 `health_manager_ai`，项目 ID 与历史轨迹归属不变；`0032_model_prices`（父版本 `0031_rename_app_project`）新建 `model_prices` 表，用于问答成本核算，初始为空表，单价在管理页「模型管理 → 计费单价」录入；`0033_admin_roles_audit`（父版本 `0032_model_prices`）为 `admin_credentials` 增加 `role` 列（存量凭据回填 `admin`，保持原有权限），并新建 `audit_logs` 表，初始为空表：
+独立验证时从 `E:\llmpython\knowledge_base` 执行，使用本项目 `.env` 的 `KNOWLEDGE_SERVICE_DATABASE_URL`；嵌入 `test_agent` 时使用宿主原有的数据库配置。真实数据库迁移及实际 `.env` 更新仍待核对目标与备份，以下为待执行的部署步骤，不表示已完成。确认目标并备份后执行迁移和模型初始化；`0014_company_credentials`（父版本 `0013_document_asset_markers`）只建空表，不生成或导入公司凭据；`0025_multi_company_credentials`（父版本 `0024_qa_faq_matched`）把单凭据升级为多凭据，已有凭据保留为「默认凭据」；`0029_feedback_loop`（父版本 `0028_column_comments`）为 `qa_records` 与 `project_qa_traces` 增加反馈字段和复核状态；`0030_retrieval_evaluation`（父版本 `0029_feedback_loop`）新建 `evaluation_sets`、`evaluation_cases`、`evaluation_runs`、`evaluation_case_results` 四张评测表，均为空表；`0031_rename_app_project`（父版本 `0030_retrieval_evaluation`）把接入项目 `test_agent` 就地改名为 `health_manager_ai`，项目 ID 与历史轨迹归属不变；`0032_model_prices`（父版本 `0031_rename_app_project`）新建 `model_prices` 表，用于问答成本核算，初始为空表，单价在管理页「模型管理 → 计费单价」录入；`0033_admin_roles_audit`（父版本 `0032_model_prices`）为 `admin_credentials` 增加 `role` 列（存量凭据回填 `admin`，保持原有权限），并新建 `audit_logs` 表，初始为空表；`0034_admin_login_accounts`（父版本 `0033_admin_roles_audit`）为 `admin_credentials` 增加可空的 `username`、`password_hash` 两列（存量凭据保持「仅长期 Token 登录」）与账号唯一索引，并新建空的 `admin_sessions` 会话表：
 
 ```powershell
 uv run alembic upgrade head

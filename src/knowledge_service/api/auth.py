@@ -8,6 +8,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from knowledge_service.application.admin_auth import find_active_session
 from knowledge_service.application.admin_credentials import hash_admin_token
 from knowledge_service.application.company_credentials import hash_company_token
 from knowledge_service.core.config import Settings, get_settings
@@ -92,10 +93,20 @@ async def authenticate_service(
                 )
             )
         ).first()
+        # 长期 Token 未命中时再查登录会话表，账号密码登录走这一支。
+        active_session = (
+            None if admin is not None else await find_active_session(session, token=token)
+        )
         if admin is not None:
             # 库里出现未知角色时按只读处理，避免配置错误放大权限。
             role = admin.role if admin.role in ADMIN_ROLES else "viewer"
             principal = ServicePrincipal(role=role, name=admin.name, credential_id=admin.id)
+        elif active_session is not None:
+            _, credential = active_session
+            role = credential.role if credential.role in ADMIN_ROLES else "viewer"
+            principal = ServicePrincipal(
+                role=role, name=credential.name, credential_id=credential.id
+            )
         else:
             company_id = await session.scalar(
                 select(CompanyCredential.company_id).where(

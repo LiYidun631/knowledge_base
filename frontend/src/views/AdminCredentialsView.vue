@@ -3,12 +3,18 @@ import { onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { client, errorMessage } from '../api/client'
 import { ROLE_LABELS, type AdminRole } from '../api/session'
+import PageHeader from '../components/ui/PageHeader.vue'
+import DataPanel from '../components/ui/DataPanel.vue'
+import StatusPill from '../components/ui/StatusPill.vue'
+import EmptyState from '../components/ui/EmptyState.vue'
 
 interface AdminCredential {
   id: string
   name: string
   role: AdminRole
   is_enabled: boolean
+  username: string | null
+  has_password: boolean
   created_at: string
   updated_at: string
 }
@@ -26,6 +32,20 @@ const createDialog = reactive({
   visible: false,
   name: '',
   role: 'admin' as AdminRole,
+  username: '',
+  password: '',
+  submitting: false,
+})
+
+// 账号密码只在弹窗内暂存，提交后不留内存副本。
+const accountDialog = reactive({
+  visible: false,
+  id: '',
+  name: '',
+  username: '',
+  password: '',
+  hasPassword: false,
+  hadUsername: false,
   submitting: false,
 })
 
@@ -52,6 +72,8 @@ async function loadCredentials() {
 function openCreateDialog() {
   createDialog.name = ''
   createDialog.role = 'admin'
+  createDialog.username = ''
+  createDialog.password = ''
   createDialog.visible = true
 }
 
@@ -60,11 +82,21 @@ async function createCredential() {
     ElMessage.warning('请填写管理员标识')
     return
   }
+  const username = createDialog.username.trim()
+  const password = createDialog.password
+  if (username && !password) {
+    ElMessage.warning('填写登录账号时要同时设置密码')
+    return
+  }
   createDialog.submitting = true
   try {
     const { data } = await client.post<{ admin_credential_id: string; token: string }>(
       '/admin/credentials',
-      { name: createDialog.name.trim(), role: createDialog.role },
+      {
+        name: createDialog.name.trim(),
+        role: createDialog.role,
+        ...(username ? { username, password } : {}),
+      },
     )
     createDialog.visible = false
     ElMessage.success('管理员凭据已创建')
@@ -74,6 +106,57 @@ async function createCredential() {
     errorMessage(error, '创建管理员凭据失败')
   } finally {
     createDialog.submitting = false
+  }
+}
+
+function openAccountDialog(credential: AdminCredential) {
+  accountDialog.id = credential.id
+  accountDialog.name = credential.name
+  accountDialog.username = credential.username ?? ''
+  accountDialog.password = ''
+  accountDialog.hasPassword = credential.has_password
+  accountDialog.hadUsername = Boolean(credential.username)
+  accountDialog.visible = true
+}
+
+async function saveAccount() {
+  const username = accountDialog.username.trim()
+  const password = accountDialog.password
+  if (username.length > 0 && username.length < 3) {
+    ElMessage.warning('登录账号至少 3 个字符')
+    return
+  }
+  if (password && password.length < 8) {
+    ElMessage.warning('密码至少 8 位')
+    return
+  }
+  if (username && !accountDialog.hasPassword && !password) {
+    ElMessage.warning('填写登录账号时要同时设置密码')
+    return
+  }
+  if (password && !username) {
+    ElMessage.warning('设置密码需要先有登录账号')
+    return
+  }
+  const payload: Record<string, string> = {}
+  if (username) payload.username = username
+  // 清空账号即收回账号密码登录入口。
+  else if (accountDialog.hadUsername) payload.username = ''
+  if (password) payload.password = password
+  if (!Object.keys(payload).length) {
+    ElMessage.info('没有需要保存的修改')
+    return
+  }
+  accountDialog.submitting = true
+  try {
+    await client.patch(`/admin/credentials/${accountDialog.id}`, payload)
+    accountDialog.visible = false
+    ElMessage.success('已更新登录方式')
+    await loadCredentials()
+  } catch (error) {
+    errorMessage(error, '更新登录方式失败')
+  } finally {
+    accountDialog.submitting = false
   }
 }
 
@@ -163,68 +246,87 @@ onMounted(loadCredentials)
 </script>
 
 <template>
-  <el-card>
-    <template #header>
-      <div class="head-row">
-        <span class="head-title"><el-icon><User /></el-icon>管理员管理</span>
-        <el-button type="primary" @click="openCreateDialog">新建管理员</el-button>
-      </div>
-    </template>
+  <div class="admins-page">
+    <PageHeader
+      title="管理员管理"
+      eyebrow="角色与凭据"
+      subtitle="登录账号密码与长期 Token 都在此签发 · .env 引导 Token 始终有效，可作遗忘时的兜底入口"
+    >
+      <template #meta>
+        <span class="header-count">共 {{ credentials.length }} 个</span>
+      </template>
+      <template #actions>
+        <el-button type="primary" size="small" @click="openCreateDialog">
+          <el-icon><Plus /></el-icon>新建管理员
+        </el-button>
+      </template>
+    </PageHeader>
 
-    <el-alert
-      type="info"
-      :closable="false"
-      show-icon
-      title="库内管理员 Token 由这里签发；.env 中的引导 Token 始终有效，可作为遗忘凭据时的兜底入口。"
-      class="tip"
-    />
-
-    <el-table :data="credentials" v-loading="loading" empty-text="暂无库内管理员凭据">
-      <el-table-column prop="name" label="管理员标识" min-width="160" show-overflow-tooltip />
-      <el-table-column label="角色" width="132">
-        <template #default="{ row }">
-          <el-select
-            :model-value="row.role"
-            size="small"
-            @change="(role: AdminRole) => changeRole(row, role)"
-          >
-            <el-option
-              v-for="option in roleOptions"
-              :key="option.value"
-              :label="option.label"
-              :value="option.value"
-            />
-          </el-select>
-        </template>
-      </el-table-column>
-      <el-table-column label="状态" width="90">
-        <template #default="{ row }">
-          <el-tag v-if="row.is_enabled" type="success" size="small">启用</el-tag>
-          <el-tag v-else type="info" size="small">已停用</el-tag>
-        </template>
-      </el-table-column>
-      <el-table-column label="启用" width="70">
-        <template #default="{ row }">
-          <el-switch
-            :model-value="row.is_enabled"
-            @change="(v: string | number | boolean) => toggleEnabled(row, v)"
+    <DataPanel flush>
+      <el-table :data="credentials" v-loading="loading">
+        <template #empty>
+          <EmptyState
+            title="还没有库内管理员凭据"
+            text="新建管理员后会签发一枚明文 Token，交给对应的人登录管理端。"
           />
         </template>
-      </el-table-column>
-      <el-table-column label="创建时间" width="110">
-        <template #default="{ row }">{{ formatDate(row.created_at) }}</template>
-      </el-table-column>
-      <el-table-column label="操作" width="150" fixed="right">
-        <template #default="{ row }">
-          <el-button size="small" text type="primary" @click="resetCredential(row)">
-            重置
-          </el-button>
-          <el-button size="small" text type="danger" @click="removeCredential(row)">
-            删除
-          </el-button>
-        </template>
-      </el-table-column>
-    </el-table>
+        <el-table-column prop="name" label="管理员标识" min-width="150" show-overflow-tooltip />
+        <el-table-column label="登录账号" width="150">
+          <template #default="{ row }">
+            <span v-if="row.username" class="account-name">{{ row.username }}</span>
+            <StatusPill v-else label="仅 Token" tone="info" />
+          </template>
+        </el-table-column>
+        <el-table-column label="角色" width="132">
+          <template #default="{ row }">
+            <el-select
+              :model-value="row.role"
+              size="small"
+              @change="(role: AdminRole) => changeRole(row, role)"
+            >
+              <el-option
+                v-for="option in roleOptions"
+                :key="option.value"
+                :label="option.label"
+                :value="option.value"
+              />
+            </el-select>
+          </template>
+        </el-table-column>
+        <el-table-column label="状态" width="90">
+          <template #default="{ row }">
+            <StatusPill
+              :label="row.is_enabled ? '启用' : '已停用'"
+              :tone="row.is_enabled ? 'success' : 'info'"
+            />
+          </template>
+        </el-table-column>
+        <el-table-column label="启用" width="70">
+          <template #default="{ row }">
+            <el-switch
+              :model-value="row.is_enabled"
+              @change="(v: string | number | boolean) => toggleEnabled(row, v)"
+            />
+          </template>
+        </el-table-column>
+        <el-table-column label="创建时间" width="110">
+          <template #default="{ row }">{{ formatDate(row.created_at) }}</template>
+        </el-table-column>
+        <el-table-column label="操作" width="200" fixed="right">
+          <template #default="{ row }">
+            <el-button size="small" text type="primary" @click="openAccountDialog(row)">
+              账号密码
+            </el-button>
+            <el-button size="small" text type="primary" @click="resetCredential(row)">
+              重置
+            </el-button>
+            <el-button size="small" text type="danger" @click="removeCredential(row)">
+              删除
+            </el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+    </DataPanel>
 
     <el-dialog
       v-model="createDialog.visible"
@@ -249,11 +351,54 @@ onMounted(loadCredentials)
             {{ roleOptions.find((option) => option.value === createDialog.role)?.hint }}
           </div>
         </el-form-item>
+        <el-form-item label="登录账号">
+          <el-input v-model="createDialog.username" maxlength="60" placeholder="选填，例如 liyidun" />
+        </el-form-item>
+        <el-form-item label="登录密码">
+          <el-input
+            v-model="createDialog.password"
+            type="password"
+            show-password
+            maxlength="128"
+            placeholder="填写账号时必填，至少 8 位"
+          />
+        </el-form-item>
       </el-form>
       <template #footer>
         <el-button @click="createDialog.visible = false">取消</el-button>
         <el-button type="primary" :loading="createDialog.submitting" @click="createCredential">
           创建并签发 Token
+        </el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog
+      v-model="accountDialog.visible"
+      :title="`「${accountDialog.name}」的登录账号密码`"
+      width="440px"
+      :close-on-click-modal="false"
+    >
+      <el-form label-width="90px">
+        <el-form-item label="登录账号">
+          <el-input v-model="accountDialog.username" maxlength="60" placeholder="留空即收回账号登录" />
+        </el-form-item>
+        <el-form-item label="登录密码">
+          <el-input
+            v-model="accountDialog.password"
+            type="password"
+            show-password
+            maxlength="128"
+            :placeholder="accountDialog.hasPassword ? '留空表示不修改' : '至少 8 位'"
+          />
+        </el-form-item>
+      </el-form>
+      <p class="account-hint">
+        会话 7 天有效；改密或停用凭据会把该管理员已登录的会话全部退出。长期 Token 不受影响。
+      </p>
+      <template #footer>
+        <el-button @click="accountDialog.visible = false">取消</el-button>
+        <el-button type="primary" :loading="accountDialog.submitting" @click="saveAccount">
+          保存
         </el-button>
       </template>
     </el-dialog>
@@ -281,27 +426,29 @@ onMounted(loadCredentials)
         <el-button type="primary" @click="tokenDialog.visible = false">我已保存</el-button>
       </template>
     </el-dialog>
-  </el-card>
+  </div>
 </template>
 
 <style scoped>
-.head-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
+.header-count {
+  font-size: var(--kb-font-xs);
+  color: var(--el-text-color-secondary);
+  font-variant-numeric: tabular-nums;
 }
-.head-title {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  color: var(--el-color-primary);
+.account-name {
+  font-family: 'Cascadia Code', Consolas, 'Courier New', monospace;
+  font-size: var(--kb-font-sm);
+  color: var(--el-text-color-primary);
 }
-.tip {
-  margin-bottom: 12px;
+.account-hint {
+  margin: 4px 0 0;
+  font-size: var(--kb-font-xs);
+  line-height: 1.6;
+  color: var(--el-text-color-secondary);
 }
 .role-hint {
   margin-top: 6px;
-  font-size: 12px;
+  font-size: var(--kb-font-xs);
   line-height: 1.5;
   color: var(--el-text-color-secondary);
 }
@@ -310,8 +457,8 @@ onMounted(loadCredentials)
 }
 .token-box {
   display: flex;
+  gap: 10px;
   align-items: center;
-  gap: 8px;
   background: var(--el-color-primary-light-9);
   border: 1px dashed var(--el-color-primary-light-7);
   border-radius: var(--el-border-radius-base);
@@ -320,7 +467,7 @@ onMounted(loadCredentials)
 .token-text {
   flex: 1;
   word-break: break-all;
-  font-size: 13px;
+  font-size: var(--kb-font-sm);
   font-family: 'Cascadia Code', Consolas, 'Courier New', monospace;
   color: var(--el-color-primary-dark-2);
 }
